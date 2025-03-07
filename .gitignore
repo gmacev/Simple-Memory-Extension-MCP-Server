@@ -132,3 +132,4 @@ dist
 # misc
 .idea
 venv
+/data/

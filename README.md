@@ -1,6 +1,6 @@
 # Simple Memory Extension MCP Server
 
-An MCP server to extend the context of agents. Useful when coding big features or vibe coding and need to store/recall progress, key moments or changes or anything worth remembering. Simply ask the agent to store memories and recall whenever you want.
+An MCP server to extend the context window / memory of agents. Useful when coding big features or vibe coding and need to store/recall progress, key moments or changes or anything worth remembering. Simply ask the agent to store memories and recall whenever you need or ask the agent to fully managed its memory however it sees fit.
 
 ## Usage
 
@@ -44,6 +44,13 @@ npm run dev
 # Format code
 npm run format
 ```
+
+## Environment Variables
+
+`DB_PATH`: `./data/context.db` Path to SQLite database file  
+`PORT`: `3000` Port number for the server  
+`USE_HTTP_SSE`: `true/false` Use HTTP SSE or Stdio  
+`LOG_LEVEL`: `info` Logging configuration (debug, info, warn, error)
 
 ## Semantic Search
 

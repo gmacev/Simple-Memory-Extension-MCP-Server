@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node scripts/start.js",
+    "setup": "node scripts/setup.js",
     "dev": "nodemon",
     "format": "prettier --write \"src/**/*.ts\""
   },

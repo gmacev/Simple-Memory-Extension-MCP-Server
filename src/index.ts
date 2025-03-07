@@ -14,7 +14,7 @@ import path from 'path';
 dotenv.config();
 
 // Configure logging level from environment variable
-const configuredLogLevel = process.env.LOG_LEVEL;
+const configuredLogLevel = process.env.LOG_LEVEL || 'info';
 if (configuredLogLevel) {
   switch (configuredLogLevel.toLowerCase()) {
     case 'debug':
@@ -45,7 +45,7 @@ async function main() {
     logger.info('Initializing EnhancedPersistentKeyValueStoreMCPServer...');
 
     // Get database path from environment variable or use default path
-    const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'data', 'memory.db');
+    const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'data', 'context.db');
     logger.info(`Using database at: ${dbPath}`);
 
     // Initialize the SQLite database

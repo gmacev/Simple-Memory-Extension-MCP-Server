@@ -45,12 +45,20 @@ npm run dev
 npm run format
 ```
 
-## Environment Variables
+## .env
 
-`DB_PATH`: `./data/context.db` Path to SQLite database file  
-`PORT`: `3000` Port number for the server  
-`USE_HTTP_SSE`: `true/false` Use HTTP SSE or Stdio  
-`LOG_LEVEL`: `info` Logging configuration (debug, info, warn, error)
+```
+# Path to SQLite database file
+DB_PATH=./data/context.db
+
+PORT=3000
+
+# Use HTTP SSE or Stdio
+USE_HTTP_SSE=true
+
+# Logging Configuration: debug, info, warn, error
+LOG_LEVEL=info
+```
 
 ## Semantic Search
 

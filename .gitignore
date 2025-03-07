@@ -133,3 +133,4 @@ dist
 .idea
 venv
 /data/
+src/python/download_model.py

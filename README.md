@@ -1,6 +1,6 @@
 # Simple Memory Extension MCP Server
 
-An MCP server to extend the context window / memory of agents. Useful when coding big features or vibe coding and need to store/recall progress, key moments or changes or anything worth remembering. Simply ask the agent to store memories and recall whenever you need or ask the agent to fully managed its memory (through cursor rules for example) however it sees fit.
+An MCP server to extend the context window / memory of agents. Useful when coding big features or vibe coding and need to store/recall progress, key moments or changes or anything worth remembering. Simply ask the agent to store memories and recall whenever you need or ask the agent to fully manage its memory (through cursor rules for example) however it sees fit.
 
 ## Usage
 

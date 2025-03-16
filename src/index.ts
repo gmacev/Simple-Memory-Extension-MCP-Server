@@ -42,7 +42,7 @@ async function main() {
   let server: McpServer;
 
   try {
-    logger.info('Initializing EnhancedPersistentKeyValueStoreMCPServer...');
+    logger.info('Initializing simple-memory-extension-mcp-server...');
 
     // Get database path from environment variable or use default path
     const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'data', 'context.db');
@@ -62,7 +62,7 @@ async function main() {
 
     // Create an MCP server
     server = new McpServer({
-      name: 'EnhancedPersistentKeyValueStoreMCPServer',
+      name: 'simple-memory-extension-mcp-server',
       version: '1.0.0',
     });
 

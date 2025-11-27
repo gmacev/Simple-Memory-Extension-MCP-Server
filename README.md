@@ -16,7 +16,7 @@ npm start
 ```json
   "mcpServers": {
     "simple-memory": {
-      "url": "http://localhost:3009/sse",
+      "url": "http://localhost:3000/sse",
       "trust": false
     }
   }

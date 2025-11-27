@@ -11,6 +11,17 @@ npm install
 npm start
 ```
 
+### MCP setup
+
+```json
+  "mcpServers": {
+    "simple-memory": {
+      "url": "http://localhost:3009/sse",
+      "trust": false
+    }
+  }
+```
+
 ### Available Tools
 
 #### Context Item Management

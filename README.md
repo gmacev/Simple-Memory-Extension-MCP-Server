@@ -58,6 +58,8 @@ cd Simple-Memory-Extension-MCP-Server
 npm run setup
 ```
 
+Or just point your agent to this repo.
+
 Setup installs the Node and Python dependencies, downloads any missing models, selects the best available GPU or CPU backend, builds the server, and verifies the installation. The models are public, so a Hugging Face key is not required.
 
 Python, `uv`, and `curl` do not need to be installed beforehand. Setup downloads the official `uv` installer through Node.js, and `uv` installs the managed Python 3.12 runtime.

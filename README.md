@@ -1,89 +1,156 @@
-# Simple Memory Extension MCP Server
+# Simple Memory
 
-An MCP server to extend the context window / memory of agents. Useful when coding big features or vibe coding and need to store/recall progress, key moments or changes or anything worth remembering. Simply ask the agent to store memories and recall whenever you need or ask the agent to fully manage its memory (through cursor rules for example) however it sees fit.
+Simple Memory is a local, persistent memory layer for AI agents using the Model Context Protocol (MCP).
 
-## Usage
+It gives agents a place to store and recall information across separate chats, tasks, and applications. Memories can contain any JSON data, so the server does not impose a specific workflow or domain.
 
-### Starting the Server
+## What is it for?
+
+Simple Memory can help an agent remember:
+
+- Decisions, facts, risks, and ongoing work across multiple conversations
+- Business operations, customers, agreements, and organizational knowledge
+- Research findings together with their sources and confidence
+- Plans, preferences, notes, and long-running personal projects
+- Relationships and dependencies between stored information
+
+Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, and relationships. Search is multilingual and combines exact, lexical, and semantic retrieval.
+
+## Models
+
+Simple Memory uses two local models:
+
+- **Qwen3-Embedding-0.6B** converts memories and queries into vectors for multilingual semantic retrieval.
+- **Qwen3-Reranker-0.6B** reviews the best candidates and improves their final ordering.
+
+They were selected because they provide strong multilingual retrieval in a relatively small size that remains practical to run locally. Inference automatically prefers a supported GPU and falls back to CPU.
+
+## Where is memory stored?
+
+Memories are stored locally in a SQLite database named `memory.db`.
+
+| Operating system | Default location |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\simple-memory\memory.db` |
+| macOS | `~/Library/Application Support/simple-memory/memory.db` |
+| Linux | `$XDG_DATA_HOME/simple-memory/memory.db`, or `~/.local/share/simple-memory/memory.db` |
+
+The location can be changed with:
+
+- `SIMPLE_MEMORY_DATA_DIR` for a different data directory
+- `SIMPLE_MEMORY_DB_PATH` for a specific database file
+
+Model files are stored separately in the standard Hugging Face cache.
+
+## Installation
+
+Requirements:
+
+- Node.js 24 or newer
+- npm 11 or newer
+- Internet access during the first model download
+
+Clone the repository and run the setup command:
 
 ```bash
-npm install
-npm start
+git clone https://github.com/gmacev/Simple-Memory-Extension-MCP-Server.git
+cd Simple-Memory-Extension-MCP-Server
+npm run setup
 ```
 
-### MCP setup
+Setup installs the Node and Python dependencies, downloads any missing models, selects the best available GPU or CPU backend, builds the server, and verifies the installation. The models are public, so a Hugging Face key is not required.
 
-```json
-  "mcpServers": {
-    "simple-memory": {
-      "url": "http://localhost:3000/sse",
-      "trust": false
-    }
-  }
+Python, `uv`, and `curl` do not need to be installed beforehand. Setup downloads the official `uv` installer through Node.js, and `uv` installs the managed Python 3.12 runtime.
+
+Configure your MCP client to launch the server through stdio. Example Codex configuration:
+
+```toml
+[mcp_servers.simple-memory]
+command = "node"
+args = ["dist/index.js"]
+cwd = "/absolute/path/to/Simple-Memory-Extension-MCP-Server"
+startup_timeout_sec = 120
+tool_timeout_sec = 900
 ```
 
-### Available Tools
+Replace `cwd` with the absolute path to the cloned repository. The MCP client starts the server automatically; `npm start` does not need to run separately.
 
-#### Context Item Management
-- `store_context_item` - Store a value with key in namespace
-- `retrieve_context_item_by_key` - Get value by key
-- `delete_context_item` - Delete key-value pair
+## Environment variables
 
-#### Namespace Management
-- `create_namespace` - Create new namespace
-- `delete_namespace` - Delete namespace and all contents
-- `list_namespaces` - List all namespaces
-- `list_context_item_keys` - List keys in a namespace
+All configuration is optional.
 
-#### Semantic Search
-- `retrieve_context_items_by_semantic_search` - Find items by meaning
+### General
 
-### Semantic Search Implementation
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SIMPLE_MEMORY_DATA_DIR` | Memory data directory | Platform location listed above |
+| `SIMPLE_MEMORY_DB_PATH` | Complete SQLite database path | `<data-dir>/memory.db` |
+| `SIMPLE_MEMORY_MODELS` | Set to `disabled` for lexical-only operation | `enabled` |
+| `SIMPLE_MEMORY_DEVICE` | Runtime device such as `cuda`, `xpu`, `mps`, or `cpu` | `auto` |
+| `SIMPLE_MEMORY_LOCAL_FILES_ONLY` | Prevent model downloads and use the local cache only | `false` |
+| `SIMPLE_MEMORY_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
+| `SIMPLE_MEMORY_MODEL_TIMEOUT_MS` | Model request timeout | `600000` |
 
-1. Query converted to vector using E5 model
-2. Text automatically split into chunks for better matching
-3. Cosine similarity calculated between query and stored chunks
-4. Results filtered by threshold and sorted by similarity
-5. Top matches returned with full item values
+### Transport
 
-## Development
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SIMPLE_MEMORY_TRANSPORT` | `stdio` or Streamable `http` | `stdio` |
+| `SIMPLE_MEMORY_HTTP_HOST` | HTTP bind address | `127.0.0.1` |
+| `SIMPLE_MEMORY_HTTP_PORT` | HTTP port | `3000` |
+| `SIMPLE_MEMORY_HTTP_TOKEN` | Optional bearer token | Unset |
+| `SIMPLE_MEMORY_HTTP_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call HTTP | Local server origins; required for wildcard bind addresses |
 
-```bash
-# Dev server
-npm run dev
+### Retrieval and models
 
-# Format code
-npm run format
-```
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SIMPLE_MEMORY_EMBEDDING_MODEL` | Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
+| `SIMPLE_MEMORY_EMBEDDING_REVISION` | Embedding model revision | Built-in pinned revision |
+| `SIMPLE_MEMORY_RERANKER_MODEL` | Reranking model | `Qwen/Qwen3-Reranker-0.6B` |
+| `SIMPLE_MEMORY_RERANKER_REVISION` | Reranking model revision | Built-in pinned revision |
+| `SIMPLE_MEMORY_EMBEDDING_DIMENSION` | Stored vector dimensions | `1024` |
+| `SIMPLE_MEMORY_QUERY_INSTRUCTION` | Embedding retrieval instruction | Built-in generic instruction |
+| `SIMPLE_MEMORY_RERANK_INSTRUCTION` | Reranking instruction | Built-in generic instruction |
+| `SIMPLE_MEMORY_EMBED_BATCH_SIZE` | Embedding batch size | `8` |
+| `SIMPLE_MEMORY_RERANK_BATCH_SIZE` | Reranking batch size | `4` |
+| `SIMPLE_MEMORY_LEXICAL_CANDIDATES` | Lexical candidates considered | `100` |
+| `SIMPLE_MEMORY_SEMANTIC_CANDIDATES` | Semantic candidates considered | `100` |
+| `SIMPLE_MEMORY_RERANK_CANDIDATES` | Candidates sent to the reranker | `30` |
 
-## .env
+### Setup and Python
 
-```
-# Path to SQLite database file
-DB_PATH=./data/context.db
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SIMPLE_MEMORY_TORCH_BACKEND` | PyTorch backend selected during setup | Automatically detected |
+| `SIMPLE_MEMORY_UV` | Path to a specific `uv` executable | Automatically located |
+| `SIMPLE_MEMORY_PYTHON` | Path to the Python executable used by the server | Bundled virtual environment |
+| `SIMPLE_MEMORY_PYTHON_PROJECT` | Path to the model-runtime project | Repository `python` directory |
 
-PORT=3000
+Standard Hugging Face variables such as `HF_HOME` can also be used to relocate the shared model cache.
 
-# Use HTTP SSE or Stdio
-USE_HTTP_SSE=true
+## Available tools
 
-# Logging Configuration: debug, info, warn, error
-LOG_LEVEL=info
-```
+| Tool | Purpose |
+| --- | --- |
+| `space_create` | Create an isolated memory space. |
+| `space_list` | List memory spaces. |
+| `memory_create` | Store a new memory. |
+| `memory_revise` | Add a new immutable revision. |
+| `memory_get` | Read a current or historical memory. |
+| `memory_history` | Read revision history. |
+| `memory_list` | List memory summaries with filters and pagination. |
+| `memory_search` | Search by exact text, meaning, metadata, provenance, state, or time. |
+| `memory_archive` | Remove a memory from normal recall while retaining it. |
+| `memory_delete` | Soft-delete a memory while preserving its history. |
+| `memory_link` | Create a relationship between memories. |
+| `memory_unlink` | Remove a relationship. |
+| `memory_traverse` | Explore connected memories. |
+| `memory_feedback` | Record usefulness, correctness, verification, or staleness feedback. |
+| `memory_status` | Inspect storage, indexing, and model health. |
 
-## Semantic Search
+Agents can also read complete memories and revision histories through MCP resources.
 
-This project includes semantic search capabilities using the E5 embedding model from Hugging Face. This allows you to find context items based on their meaning rather than just exact key matches.
+## License
 
-### Setup
-
-The semantic search feature requires Python dependencies, but these *should be* automatically installed when you run: `npm run start`
-
-### Embedding Model
-
-We use the [intfloat/multilingual-e5-large-instruct](https://huggingface.co/intfloat/multilingual-e5-large-instruct)
-
-
-### Notes
-
-Developed mostly while vibe coding, so don't expect much :D. But it works, and I found it helpful so w/e. Feel free to contribute or suggest improvements.
+MIT

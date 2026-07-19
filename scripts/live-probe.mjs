@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const modelsEnabled = !process.argv.includes('--models-disabled');
@@ -13,6 +15,91 @@ let activeClient;
 
 function assert(condition, message) {
   if (!condition) throw new Error(`Live probe assertion failed: ${message}`);
+}
+
+function deletionRowCounts(memoryId, revisionIds, segmentIds) {
+  const database = new Database(path.join(dataDir, 'memory.db'));
+  try {
+    sqliteVec.load(database);
+    const revisionPlaceholders = revisionIds.map(() => '?').join(', ');
+    const segmentPlaceholders = segmentIds.map(() => '?').join(', ');
+    const count = (sql, ...parameters) => Number(database.prepare(sql).get(...parameters).count);
+    return {
+      memories: count('SELECT COUNT(*) AS count FROM memories WHERE id = ?', memoryId),
+      revisions: count(
+        'SELECT COUNT(*) AS count FROM memory_revisions WHERE memory_id = ?',
+        memoryId,
+      ),
+      stateEvents: count(
+        'SELECT COUNT(*) AS count FROM memory_state_events WHERE memory_id = ?',
+        memoryId,
+      ),
+      tags: count(
+        `SELECT COUNT(*) AS count FROM revision_tags WHERE revision_id IN (${revisionPlaceholders})`,
+        ...revisionIds,
+      ),
+      sources: count(
+        `SELECT COUNT(*) AS count FROM revision_sources WHERE revision_id IN (${revisionPlaceholders})`,
+        ...revisionIds,
+      ),
+      segments: count(
+        'SELECT COUNT(*) AS count FROM memory_segments WHERE memory_id = ?',
+        memoryId,
+      ),
+      lexicalEntries: count(
+        'SELECT COUNT(*) AS count FROM memory_fts WHERE memory_id = ?',
+        memoryId,
+      ),
+      vectors: count(
+        `SELECT COUNT(*) AS count FROM memory_vectors WHERE segment_id IN (${segmentPlaceholders})`,
+        ...segmentIds,
+      ),
+      links: count(
+        'SELECT COUNT(*) AS count FROM memory_links WHERE from_memory_id = ? OR to_memory_id = ?',
+        memoryId,
+        memoryId,
+      ),
+      feedback: count(
+        'SELECT COUNT(*) AS count FROM memory_feedback WHERE memory_id = ?',
+        memoryId,
+      ),
+      indexJobs: count(
+        `SELECT COUNT(*) AS count FROM index_jobs WHERE revision_id IN (${revisionPlaceholders})`,
+        ...revisionIds,
+      ),
+    };
+  } finally {
+    database.close();
+  }
+}
+
+function seedDeletionProbeVector(segmentId) {
+  const database = new Database(path.join(dataDir, 'memory.db'));
+  try {
+    sqliteVec.load(database);
+    const existing = Number(
+      database
+        .prepare('SELECT COUNT(*) AS count FROM memory_vectors WHERE segment_id = ?')
+        .get(segmentId).count,
+    );
+    if (existing > 0) return;
+    const dimensions = Number.parseInt(
+      process.env.SIMPLE_MEMORY_EMBEDDING_DIMENSION ?? '1024',
+      10,
+    );
+    database
+      .prepare(
+        `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
+         VALUES (?, ?, ?)`,
+      )
+      .run(
+        segmentId,
+        Buffer.from(new Float32Array(dimensions).buffer),
+        'deletion-integrity-probe',
+      );
+  } finally {
+    database.close();
+  }
 }
 
 function toolResult(response) {
@@ -77,9 +164,31 @@ async function run() {
     'memory_traverse',
     'memory_feedback',
     'memory_status',
+    'memory_archive',
+    'memory_restore',
+    'memory_delete',
   ]) {
     assert(names.has(required), `missing MCP tool ${required}`);
   }
+  const archiveTool = tools.tools.find((tool) => tool.name === 'memory_archive');
+  const restoreTool = tools.tools.find((tool) => tool.name === 'memory_restore');
+  const deleteTool = tools.tools.find((tool) => tool.name === 'memory_delete');
+  assert(
+    archiveTool?.description?.includes('Reversibly') &&
+      archiveTool.description.includes('memory_delete'),
+    'archive description should distinguish recoverable retention from permanent deletion',
+  );
+  assert(
+    restoreTool?.description?.includes('active status') &&
+      restoreTool.description.includes('without changing its content'),
+    'restore description should explain reactivation without revision changes',
+  );
+  assert(
+    deleteTool?.description?.includes('Permanently and irreversibly') &&
+      deleteTool.description.includes('all relationships'),
+    'delete description should disclose complete irreversible erasure',
+  );
+  assert(deleteTool?.annotations?.destructiveHint === true, 'delete must be marked destructive');
 
   const space = await call(client, 'space_create', {
     id: 'live-probe',
@@ -482,6 +591,21 @@ async function run() {
     !afterArchive.results.some((item) => item.id === preference.id),
     'archived memory exclusion',
   );
+  const defaultInventoryAfterArchive = await call(client, 'memory_list', {
+    spaceId: 'live-probe',
+  });
+  assert(
+    !defaultInventoryAfterArchive.items.some((item) => item.id === preference.id),
+    'default memory inventory should exclude archived memories',
+  );
+  const archivedInventory = await call(client, 'memory_list', {
+    spaceId: 'live-probe',
+    state: 'archived',
+  });
+  assert(
+    archivedInventory.items.some((item) => item.id === preference.id),
+    'explicit archived inventory should include archived memories',
+  );
   const archivedRecall = await call(client, 'memory_search', {
     query: 'KelioniÅ³ pageidavimas',
     spaceIds: ['live-probe'],
@@ -514,6 +638,80 @@ async function run() {
     historicalPreference.state === 'active',
     'record-time read should return historical state',
   );
+  const restoredPreference = await call(client, 'memory_restore', { memoryId: preference.id });
+  assert(restoredPreference.state === 'active', 'restored memory should return to active state');
+  const defaultInventoryAfterRestore = await call(client, 'memory_list', {
+    spaceId: 'live-probe',
+  });
+  assert(
+    defaultInventoryAfterRestore.items.some((item) => item.id === preference.id),
+    'restored memory should return to the default active inventory',
+  );
+  const restoredRecall = await call(client, 'memory_search', {
+    query: 'Kelionių pageidavimas',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  assert(
+    restoredRecall.results.some((item) => item.id === preference.id),
+    'restored memory should return to normal recall',
+  );
+
+  const disposable = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    title: 'Disposable memory',
+    kind: 'test-draft',
+    content: { secret: 'This content must be permanently erased.' },
+    tags: ['delete-probe'],
+    sources: [{ uri: 'urn:probe:permanent-deletion', type: 'test-fixture' }],
+  });
+  await call(client, 'memory_link', {
+    fromMemoryId: lease.id,
+    toMemoryId: disposable.id,
+    relation: 'temporary-test-link',
+  });
+  await call(client, 'memory_feedback', {
+    memoryId: disposable.id,
+    signal: 'test-only',
+  });
+  const inspectionDatabase = new Database(path.join(dataDir, 'memory.db'), { readonly: true });
+  const disposableSegmentIds = inspectionDatabase
+    .prepare('SELECT id FROM memory_segments WHERE memory_id = ? ORDER BY id')
+    .all(disposable.id)
+    .map((row) => String(row.id));
+  inspectionDatabase.close();
+  assert(disposableSegmentIds.length > 0, 'deletion fixture should have indexed segments');
+  if (!modelsEnabled) seedDeletionProbeVector(disposableSegmentIds[0]);
+  const deletionRevisionIds = [disposable.revision.id];
+  const rowsBeforeDeletion = deletionRowCounts(
+    disposable.id,
+    deletionRevisionIds,
+    disposableSegmentIds,
+  );
+  for (const [table, rowCount] of Object.entries(rowsBeforeDeletion)) {
+    assert(rowCount > 0, `deletion fixture should populate ${table}`);
+  }
+  const deletion = await call(client, 'memory_delete', { memoryId: disposable.id });
+  assert(deletion.id === disposable.id && deletion.deleted === true, 'deletion acknowledgement');
+  await expectToolError(client, 'memory_get', { memoryId: disposable.id });
+  await expectToolError(client, 'memory_history', { memoryId: disposable.id });
+  await call(client, 'memory_delete', { memoryId: disposable.id });
+  const afterDeleteTraversal = await call(client, 'memory_traverse', {
+    memoryId: lease.id,
+    maxDepth: 2,
+  });
+  assert(
+    !afterDeleteTraversal.some((entry) => entry.memory.id === disposable.id),
+    'permanent deletion should remove relationships',
+  );
+  const rowsAfterDeletion = deletionRowCounts(
+    disposable.id,
+    deletionRevisionIds,
+    disposableSegmentIds,
+  );
+  for (const [table, rowCount] of Object.entries(rowsAfterDeletion)) {
+    assert(rowCount === 0, `permanent deletion should purge ${table}`);
+  }
 
   await client.close();
   activeClient = undefined;
@@ -531,6 +729,7 @@ async function run() {
     linkId: link.id,
     revisions: history.revisions.length,
     persistedRevision: persisted.revision.revisionNumber,
+    physicalDeletionVerified: true,
     payloadCharacters: {
       createAcknowledgement: JSON.stringify(lease).length,
       listPage: JSON.stringify(firstPage).length,

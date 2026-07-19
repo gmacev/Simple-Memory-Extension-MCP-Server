@@ -90,8 +90,12 @@ export class MemoryService {
     return this.searchEngine.search(options);
   }
 
-  public setState(memoryId: string, state: 'active' | 'archived' | 'deleted'): MemoryRecord {
+  public setState(memoryId: string, state: 'active' | 'archived'): MemoryRecord {
     return this.store.setState(memoryId, state);
+  }
+
+  public deleteMemory(memoryId: string): boolean {
+    return this.store.deleteMemory(memoryId);
   }
 
   public createLink(

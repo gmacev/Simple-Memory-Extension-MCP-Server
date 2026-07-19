@@ -567,7 +567,7 @@ export class MemoryStore {
       clauses.push('m.state = ?');
       parameters.push(filters.state);
     } else {
-      clauses.push("m.state != 'deleted'");
+      clauses.push("m.state = 'active'");
     }
     if (filters.kind) {
       clauses.push('r.kind = ?');
@@ -606,6 +606,9 @@ export class MemoryStore {
 
   public setState(memoryId: string, state: MemoryState): MemoryRecord {
     const current = this.getMemory(memoryId);
+    if (current.state === 'deleted' && state !== 'deleted') {
+      throw new Error('Deleted memories cannot be restored or archived');
+    }
     if (current.state === state) return current;
     const latestEvent = this.requireRow(
       `SELECT recorded_at FROM memory_state_events
@@ -718,6 +721,9 @@ export class MemoryStore {
     if (segments.length !== vectors.length) throw new Error('Segment/vector count mismatch');
     const transaction = this.database.transaction(() => {
       const remove = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+      const segmentExists = this.database.prepare(
+        'SELECT 1 FROM memory_segments WHERE id = ? AND revision_id = ?',
+      );
       const insert = this.database.prepare(
         `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
          VALUES (?, ?, ?)`,
@@ -729,6 +735,9 @@ export class MemoryStore {
         const segment = segments[index];
         const vector = vectors[index];
         if (!segment || !vector) throw new Error('Missing segment or vector');
+        if (!segmentExists.get(segment.id, segment.revisionId)) {
+          throw new Error('Memory revision was deleted while semantic indexing was running');
+        }
         remove.run(segment.id);
         insert.run(segment.id, Buffer.from(new Float32Array(vector).buffer), modelProfileId);
         markProfile.run(modelProfileId, segment.id);
@@ -1220,47 +1229,55 @@ export class MemoryStore {
     this.database.exec('VACUUM');
   }
 
+  private deleteMemoryRows(memoryId: string): void {
+    const segmentIds = this.allRows(
+      'SELECT id FROM memory_segments WHERE memory_id = ?',
+      memoryId,
+    ).map((row) => String(row.id));
+    this.database.prepare('DELETE FROM memory_fts WHERE memory_id = ?').run(memoryId);
+    if (this.vectorAvailable) {
+      const removeVector = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+      for (const segmentId of segmentIds) removeVector.run(segmentId);
+    }
+    this.database
+      .prepare('DELETE FROM memory_links WHERE from_memory_id = ? OR to_memory_id = ?')
+      .run(memoryId, memoryId);
+    this.database.prepare('DELETE FROM memory_feedback WHERE memory_id = ?').run(memoryId);
+    this.database.prepare('DELETE FROM memory_state_events WHERE memory_id = ?').run(memoryId);
+    this.database
+      .prepare(
+        'DELETE FROM index_jobs WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
+      )
+      .run(memoryId);
+    this.database.prepare('DELETE FROM memory_segments WHERE memory_id = ?').run(memoryId);
+    this.database
+      .prepare(
+        'DELETE FROM revision_sources WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
+      )
+      .run(memoryId);
+    this.database
+      .prepare(
+        'DELETE FROM revision_tags WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
+      )
+      .run(memoryId);
+    this.database.prepare('DELETE FROM memory_revisions WHERE memory_id = ?').run(memoryId);
+    this.database.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
+  }
+
+  public deleteMemory(memoryId: string): boolean {
+    const exists = this.getRow('SELECT 1 FROM memories WHERE id = ?', memoryId) !== undefined;
+    if (!exists) return false;
+    const transaction = this.database.transaction(() => this.deleteMemoryRows(memoryId));
+    transaction();
+    return true;
+  }
+
   public purgeDeleted(): number {
     const ids = this.allRows("SELECT id FROM memories WHERE state = 'deleted'").map((row) =>
       String(row.id),
     );
     const transaction = this.database.transaction(() => {
-      for (const memoryId of ids) {
-        const segmentIds = this.allRows(
-          'SELECT id FROM memory_segments WHERE memory_id = ?',
-          memoryId,
-        ).map((row) => String(row.id));
-        this.database.prepare('DELETE FROM memory_fts WHERE memory_id = ?').run(memoryId);
-        if (this.vectorAvailable) {
-          const removeVector = this.database.prepare(
-            'DELETE FROM memory_vectors WHERE segment_id = ?',
-          );
-          for (const segmentId of segmentIds) removeVector.run(segmentId);
-        }
-        this.database
-          .prepare('DELETE FROM memory_links WHERE from_memory_id = ? OR to_memory_id = ?')
-          .run(memoryId, memoryId);
-        this.database.prepare('DELETE FROM memory_feedback WHERE memory_id = ?').run(memoryId);
-        this.database.prepare('DELETE FROM memory_state_events WHERE memory_id = ?').run(memoryId);
-        this.database
-          .prepare(
-            'DELETE FROM index_jobs WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
-          )
-          .run(memoryId);
-        this.database.prepare('DELETE FROM memory_segments WHERE memory_id = ?').run(memoryId);
-        this.database
-          .prepare(
-            'DELETE FROM revision_sources WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
-          )
-          .run(memoryId);
-        this.database
-          .prepare(
-            'DELETE FROM revision_tags WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
-          )
-          .run(memoryId);
-        this.database.prepare('DELETE FROM memory_revisions WHERE memory_id = ?').run(memoryId);
-        this.database.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
-      }
+      for (const memoryId of ids) this.deleteMemoryRows(memoryId);
     });
     transaction();
     return ids.length;

@@ -141,10 +141,11 @@ Standard Hugging Face variables such as `HF_HOME` can also be used to relocate t
 | `memory_revise` | Add a new immutable revision. |
 | `memory_get` | Read a current or historical memory. |
 | `memory_history` | Read revision history. |
-| `memory_list` | List memory summaries with filters and pagination. |
+| `memory_list` | List active memory summaries by default, with filters and pagination. |
 | `memory_search` | Search by exact text, meaning, metadata, provenance, state, or time. |
-| `memory_archive` | Remove a memory from normal recall while retaining it. |
-| `memory_delete` | Soft-delete a memory while preserving its history. |
+| `memory_archive` | Reversibly remove a memory from normal recall while preserving it. |
+| `memory_restore` | Return an archived memory to normal recall. |
+| `memory_delete` | Permanently erase a memory and all related data. |
 | `memory_link` | Create a relationship between memories. |
 | `memory_unlink` | Remove a relationship. |
 | `memory_traverse` | Explore connected memories. |

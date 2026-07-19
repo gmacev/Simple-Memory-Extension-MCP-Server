@@ -45,6 +45,20 @@ interface CandidateFilters {
   validAt?: string;
 }
 
+interface RevisionRelations {
+  sourcesByRevisionId: Map<string, SourceInput[]>;
+  tagsByRevisionId: Map<string, string[]>;
+}
+
+const joinedMemoryColumns = `
+  m.id AS memory_record_id,
+  m.space_id AS memory_space_id,
+  m.state AS memory_state,
+  m.created_at AS memory_created_at,
+  m.updated_at AS memory_updated_at,
+  m.current_revision_id AS memory_current_revision_id,
+  m.index_status AS memory_index_status`;
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -441,23 +455,62 @@ export class MemoryStore {
       .run(randomUUID(), revisionId, timestamp, timestamp);
   }
 
-  private revisionFromRow(row: Row): MemoryRevision {
+  private sourceFromRow(row: Row): SourceInput {
+    const result: SourceInput = { metadata: parseObject(row.metadata_json) };
+    if (typeof row.uri === 'string') result.uri = row.uri;
+    if (typeof row.label === 'string') result.label = row.label;
+    if (typeof row.type === 'string') result.type = row.type;
+    if (typeof row.observed_at === 'string') result.observedAt = row.observed_at;
+    return result;
+  }
+
+  private loadRevisionRelations(revisionIds: string[]): RevisionRelations {
+    const uniqueIds = [...new Set(revisionIds)];
+    const tagsByRevisionId = new Map<string, string[]>();
+    const sourcesByRevisionId = new Map<string, SourceInput[]>();
+    if (uniqueIds.length === 0) return { sourcesByRevisionId, tagsByRevisionId };
+
+    for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+      const batch = uniqueIds.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(',');
+      for (const row of this.allRows(
+        `SELECT revision_id, tag FROM revision_tags
+         WHERE revision_id IN (${placeholders}) ORDER BY revision_id, tag`,
+        ...batch,
+      )) {
+        const revisionId = String(row.revision_id);
+        const tags = tagsByRevisionId.get(revisionId) ?? [];
+        tags.push(String(row.tag));
+        tagsByRevisionId.set(revisionId, tags);
+      }
+      for (const row of this.allRows(
+        `SELECT * FROM revision_sources
+         WHERE revision_id IN (${placeholders}) ORDER BY revision_id, id`,
+        ...batch,
+      )) {
+        const revisionId = String(row.revision_id);
+        const sources = sourcesByRevisionId.get(revisionId) ?? [];
+        sources.push(this.sourceFromRow(row));
+        sourcesByRevisionId.set(revisionId, sources);
+      }
+    }
+    return { sourcesByRevisionId, tagsByRevisionId };
+  }
+
+  private revisionFromRow(row: Row, relations?: RevisionRelations): MemoryRevision {
     const revisionId = String(row.revision_id ?? row.id);
-    const tags = this.allRows(
-      'SELECT tag FROM revision_tags WHERE revision_id = ? ORDER BY tag',
-      revisionId,
-    ).map((tag) => String(tag.tag));
-    const sources = this.allRows(
-      'SELECT * FROM revision_sources WHERE revision_id = ? ORDER BY id',
-      revisionId,
-    ).map((source): SourceInput => {
-      const result: SourceInput = { metadata: parseObject(source.metadata_json) };
-      if (typeof source.uri === 'string') result.uri = source.uri;
-      if (typeof source.label === 'string') result.label = source.label;
-      if (typeof source.type === 'string') result.type = source.type;
-      if (typeof source.observed_at === 'string') result.observedAt = source.observed_at;
-      return result;
-    });
+    const tags = relations
+      ? (relations.tagsByRevisionId.get(revisionId) ?? [])
+      : this.allRows(
+          'SELECT tag FROM revision_tags WHERE revision_id = ? ORDER BY tag',
+          revisionId,
+        ).map((tag) => String(tag.tag));
+    const sources = relations
+      ? (relations.sourcesByRevisionId.get(revisionId) ?? [])
+      : this.allRows(
+          'SELECT * FROM revision_sources WHERE revision_id = ? ORDER BY id',
+          revisionId,
+        ).map((source) => this.sourceFromRow(source));
     return {
       id: revisionId,
       memoryId: String(row.memory_id),
@@ -499,6 +552,35 @@ export class MemoryStore {
         .enum(['pending', 'ready', 'lexical-only', 'failed'])
         .parse(memory.index_status),
       revision: this.revisionFromRow(revision),
+    };
+  }
+
+  private memoryFromJoinedRow(
+    row: Row,
+    relations: RevisionRelations,
+    state?: MemoryState,
+  ): MemoryRecord {
+    const memory: Row = {
+      id: row.memory_record_id,
+      space_id: row.memory_space_id,
+      state: row.memory_state,
+      created_at: row.memory_created_at,
+      updated_at: row.memory_updated_at,
+      current_revision_id: row.memory_current_revision_id,
+      index_status: row.memory_index_status,
+    };
+    const resolvedState = state ?? z.enum(['active', 'archived', 'deleted']).parse(memory.state);
+    return {
+      id: String(memory.id),
+      spaceId: String(memory.space_id),
+      state: resolvedState,
+      createdAt: String(memory.created_at),
+      updatedAt: String(memory.updated_at),
+      currentRevisionId: String(memory.current_revision_id),
+      indexStatus: z
+        .enum(['pending', 'ready', 'lexical-only', 'failed'])
+        .parse(memory.index_status),
+      revision: this.revisionFromRow(row, relations),
     };
   }
 
@@ -545,15 +627,70 @@ export class MemoryStore {
     return this.memoryFromRows(memory, revision, state);
   }
 
+  public getMemoriesByRevisionIds(
+    revisionIds: string[],
+    atTime?: string,
+  ): Map<string, MemoryRecord> {
+    const uniqueRevisionIds = [...new Set(revisionIds)];
+    const records = new Map<string, MemoryRecord>();
+    if (uniqueRevisionIds.length === 0) return records;
+
+    const revisionPlaceholders = uniqueRevisionIds.map(() => '?').join(',');
+    const rows = this.allRows(
+      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
+       FROM memory_revisions r
+       JOIN memories m ON m.id = r.memory_id
+       WHERE r.id IN (${revisionPlaceholders})`,
+      ...uniqueRevisionIds,
+    );
+    const relations = this.loadRevisionRelations(
+      rows.map((row) => String(row.revision_id)),
+    );
+    const statesByMemoryId = new Map<string, MemoryState>();
+    if (atTime && rows.length > 0) {
+      const memoryIds = [...new Set(rows.map((row) => String(row.memory_record_id)))];
+      const memoryPlaceholders = memoryIds.map(() => '?').join(',');
+      for (const row of this.allRows(
+        `SELECT event.memory_id, event.state
+         FROM memory_state_events event
+         JOIN (
+           SELECT memory_id, MAX(event_number) AS event_number
+           FROM memory_state_events
+           WHERE memory_id IN (${memoryPlaceholders}) AND recorded_at <= ?
+           GROUP BY memory_id
+         ) latest
+           ON latest.memory_id = event.memory_id AND latest.event_number = event.event_number`,
+        ...memoryIds,
+        atTime,
+      )) {
+        statesByMemoryId.set(
+          String(row.memory_id),
+          z.enum(['active', 'archived', 'deleted']).parse(row.state),
+        );
+      }
+    }
+
+    for (const row of rows) {
+      const memoryId = String(row.memory_record_id);
+      const historicalState = atTime ? statesByMemoryId.get(memoryId) : undefined;
+      if (atTime && !historicalState) continue;
+      const record = this.memoryFromJoinedRow(row, relations, historicalState);
+      records.set(record.revision.id, record);
+    }
+    return records;
+  }
+
   public getHistory(memoryId: string): MemoryRevision[] {
     if (!this.database.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
       throw new Error(`Memory not found: ${memoryId}`);
     }
-    return this.allRows(
+    const rows = this.allRows(
       `SELECT *, id AS revision_id FROM memory_revisions
            WHERE memory_id = ? ORDER BY revision_number DESC`,
       memoryId,
-    ).map((row) => this.revisionFromRow(row));
+    );
+    const relations = this.loadRevisionRelations(rows.map((row) => String(row.revision_id)));
+    return rows.map((row) => this.revisionFromRow(row, relations));
   }
 
   public listMemories(filters: MemoryListFilters = {}): MemoryListPage {
@@ -587,7 +724,7 @@ export class MemoryStore {
     const limit = Math.min(filters.limit ?? 50, 200);
     parameters.push(limit + 1);
     const rows = this.allRows(
-      `SELECT m.id, m.updated_at
+      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
          FROM memories m JOIN memory_revisions r ON r.id = m.current_revision_id
          WHERE ${clauses.join(' AND ')}
          ORDER BY m.updated_at DESC, m.id DESC LIMIT ?`,
@@ -595,12 +732,17 @@ export class MemoryStore {
     );
     const hasMore = rows.length > limit;
     const pageRows = rows.slice(0, limit);
-    const items = pageRows.map((row) => this.getMemory(String(row.id)));
+    const relations = this.loadRevisionRelations(
+      pageRows.map((row) => String(row.revision_id)),
+    );
+    const items = pageRows.map((row) => this.memoryFromJoinedRow(row, relations));
     const last = pageRows.at(-1);
     return {
       items,
       nextCursor:
-        hasMore && last ? encodeListCursor(String(last.updated_at), String(last.id)) : null,
+        hasMore && last
+          ? encodeListCursor(String(last.memory_updated_at), String(last.memory_record_id))
+          : null,
     };
   }
 

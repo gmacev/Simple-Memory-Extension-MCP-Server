@@ -101,18 +101,18 @@ export class Indexer {
           );
         }
       }
-      const health = await this.models.health();
-      if (health.embedding_dimension !== this.config.embeddingDimension) {
+      const profile = await this.models.embeddingProfile();
+      if (profile.embedding_dimension !== this.config.embeddingDimension) {
         throw new Error(
-          `Embedding model reports dimension ${String(health.embedding_dimension)}; expected ${this.config.embeddingDimension}`,
+          `Embedding model reports dimension ${String(profile.embedding_dimension)}; expected ${this.config.embeddingDimension}`,
         );
       }
       const modelProfileId = this.store.ensureModelProfile({
         provider: 'huggingface',
-        model: health.embedding_model,
-        modelRevision: health.embedding_revision,
-        dimensions: health.embedding_dimension,
-        instructionHash: health.query_instruction_hash,
+        model: profile.embedding_model,
+        modelRevision: profile.embedding_revision,
+        dimensions: profile.embedding_dimension,
+        instructionHash: profile.query_instruction_hash,
       });
       this.store.indexVectors(segments, vectors, modelProfileId);
       this.store.markIndexStatus(revisionId, 'ready');

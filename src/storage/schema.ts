@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS memories (
   idempotency_key TEXT,
   UNIQUE(space_id, idempotency_key)
 );
+CREATE INDEX IF NOT EXISTS idx_memories_state_updated
+  ON memories(state, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_space_state_updated
+  ON memories(space_id, state, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_current_revision ON memories(current_revision_id);
 
 CREATE TABLE IF NOT EXISTS memory_revisions (
   id TEXT PRIMARY KEY,
@@ -74,6 +79,8 @@ CREATE TABLE IF NOT EXISTS revision_sources (
   observed_at TEXT,
   metadata_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE INDEX IF NOT EXISTS idx_revision_sources_revision
+  ON revision_sources(revision_id, id);
 
 CREATE TABLE IF NOT EXISTS memory_links (
   id TEXT PRIMARY KEY,
@@ -99,6 +106,7 @@ CREATE TABLE IF NOT EXISTS memory_feedback (
   metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_feedback_memory ON memory_feedback(memory_id);
 
 CREATE TABLE IF NOT EXISTS model_profiles (
   id TEXT PRIMARY KEY,
@@ -147,4 +155,6 @@ CREATE TABLE IF NOT EXISTS index_jobs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_index_jobs_revision_status
+  ON index_jobs(revision_id, status);
 `;

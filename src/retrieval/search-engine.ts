@@ -192,16 +192,16 @@ export class SearchEngine {
           throw new Error('Semantic inference or vector storage is disabled');
         }
         const vector = await this.models.embedQuery(options.query);
-        const health = await this.models.health();
-        if (health.embedding_dimension !== vector.length) {
+        const profile = await this.models.embeddingProfile();
+        if (profile.embedding_dimension !== vector.length) {
           throw new Error('Embedding model dimension changed during query processing');
         }
         const modelProfileId = this.store.ensureModelProfile({
           provider: 'huggingface',
-          model: health.embedding_model,
-          modelRevision: health.embedding_revision,
+          model: profile.embedding_model,
+          modelRevision: profile.embedding_revision,
           dimensions: vector.length,
-          instructionHash: health.query_instruction_hash,
+          instructionHash: profile.query_instruction_hash,
         });
         addRanking(
           fused,
@@ -221,15 +221,14 @@ export class SearchEngine {
     }
 
     const queryNormalized = options.query.trim().toLocaleLowerCase();
+    const recordsByRevisionId = this.store.getMemoriesByRevisionIds(
+      [...fused.values()].map((candidate) => candidate.revisionId),
+      options.atTime,
+    );
     for (const candidate of fused.values()) {
-      try {
-        candidate.record = this.store.getMemory(candidate.memoryId, {
-          revisionId: candidate.revisionId,
-          ...(options.atTime ? { atTime: options.atTime } : {}),
-        });
-      } catch {
-        continue;
-      }
+      const record = recordsByRevisionId.get(candidate.revisionId);
+      if (!record) continue;
+      candidate.record = record;
       const title = candidate.record.revision.title?.toLocaleLowerCase() ?? '';
       if (title === queryNormalized || title.includes(queryNormalized)) {
         const titleBoost = title === queryNormalized ? 0.04 : 0.02;

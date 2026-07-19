@@ -38,6 +38,10 @@ const modelHealthSchema = z.object({
 });
 
 export type ModelHealth = z.infer<typeof modelHealthSchema>;
+export type EmbeddingModelProfile = Pick<
+  ModelHealth,
+  'embedding_dimension' | 'embedding_model' | 'embedding_revision' | 'query_instruction_hash'
+>;
 
 export class ModelClient {
   private process: ChildProcessWithoutNullStreams | null = null;
@@ -48,6 +52,7 @@ export class ModelClient {
   private circuitOpenUntil = 0;
   private starts = 0;
   private actualWorkerPid: number | null = null;
+  private embeddingProfilePromise: Promise<EmbeddingModelProfile> | null = null;
 
   public constructor(
     private readonly config: AppConfig,
@@ -133,6 +138,7 @@ export class ModelClient {
     this.lines = null;
     this.process = null;
     this.actualWorkerPid = null;
+    this.embeddingProfilePromise = null;
     this.noteFailure();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
@@ -191,6 +197,26 @@ export class ModelClient {
     const health = modelHealthSchema.parse(await this.request('health'));
     this.actualWorkerPid = health.pid;
     return health;
+  }
+
+  public embeddingProfile(): Promise<EmbeddingModelProfile> {
+    if (this.embeddingProfilePromise) return this.embeddingProfilePromise;
+    const pending = this.health().then((health) => {
+      if (health.embedding_dimension === null) {
+        throw new Error('Embedding model profile is unavailable before the model is loaded');
+      }
+      return {
+        embedding_dimension: health.embedding_dimension,
+        embedding_model: health.embedding_model,
+        embedding_revision: health.embedding_revision,
+        query_instruction_hash: health.query_instruction_hash,
+      };
+    });
+    this.embeddingProfilePromise = pending;
+    void pending.catch(() => {
+      if (this.embeddingProfilePromise === pending) this.embeddingProfilePromise = null;
+    });
+    return pending;
   }
 
   public async embedDocuments(texts: string[]): Promise<number[][]> {

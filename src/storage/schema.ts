@@ -1,12 +1,6 @@
 export const schemaSql = `
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS schema_meta (
-  version INTEGER NOT NULL
-);
-INSERT INTO schema_meta(version)
-SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
-
 CREATE TABLE IF NOT EXISTS spaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -42,6 +36,7 @@ CREATE TABLE IF NOT EXISTS memory_revisions (
   valid_from TEXT,
   valid_to TEXT,
   expires_at TEXT,
+  review_after TEXT,
   recorded_at TEXT NOT NULL,
   actor TEXT,
   content_hash TEXT NOT NULL,
@@ -62,13 +57,6 @@ CREATE TABLE IF NOT EXISTS memory_state_events (
 );
 CREATE INDEX IF NOT EXISTS idx_state_events_memory
   ON memory_state_events(memory_id, recorded_at, event_number);
-
-INSERT INTO memory_state_events(id, memory_id, event_number, state, recorded_at)
-SELECT memory.id || ':initial-state', memory.id, 1, memory.state, memory.created_at
-FROM memories AS memory
-WHERE NOT EXISTS (
-  SELECT 1 FROM memory_state_events AS event WHERE event.memory_id = memory.id
-);
 
 CREATE TABLE IF NOT EXISTS revision_tags (
   revision_id TEXT NOT NULL REFERENCES memory_revisions(id) ON DELETE CASCADE,

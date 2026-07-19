@@ -27,6 +27,7 @@ export interface MemoryInput {
   validFrom?: string;
   validTo?: string;
   expiresAt?: string;
+  reviewAfter?: string;
   idempotencyKey?: string;
 }
 
@@ -47,6 +48,7 @@ export interface MemoryRevision {
   validFrom: string | null;
   validTo: string | null;
   expiresAt: string | null;
+  reviewAfter: string | null;
   recordedAt: string;
   actor: string | null;
   contentHash: string;

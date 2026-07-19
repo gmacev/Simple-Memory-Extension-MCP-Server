@@ -14,7 +14,7 @@ Simple Memory can help an agent remember:
 - Plans, preferences, notes, and long-running personal projects
 - Relationships and dependencies between stored information
 
-Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, and relationships. Search is multilingual and combines exact, lexical, and semantic retrieval.
+Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, and relationships. Ordinary recall uses active, current, presently valid information. An optional review date can warn an agent that information may need confirmation without hiding or changing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
 
 ## Models
 

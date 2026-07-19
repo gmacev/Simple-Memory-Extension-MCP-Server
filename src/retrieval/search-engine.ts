@@ -22,6 +22,61 @@ interface FusedCandidate {
 }
 
 const RRF_CONSTANT = 60;
+const EXCERPT_LIMIT = 2_000;
+const EXCERPT_HEADER_LIMIT = 400;
+
+function contextualExcerpt(candidate: FusedCandidate & { record: MemoryRecord }): string {
+  const lines = candidate.record.revision.searchableText.split('\n');
+  const fieldPrefix = `${candidate.path}:`;
+  const matchedIndex = lines.findIndex((line) => line.startsWith(fieldPrefix));
+  if (matchedIndex < 0) return candidate.excerpt.slice(0, EXCERPT_LIMIT);
+
+  const separator = candidate.path.lastIndexOf('/');
+  const parentPath = separator > 0 ? candidate.path.slice(0, separator) : candidate.path;
+  const siblingPrefix = `${parentPath}/`;
+  const siblingIndices = lines
+    .map((line, index) => (line.startsWith(siblingPrefix) ? index : -1))
+    .filter((index) => index >= 0);
+  const matchedPosition = siblingIndices.indexOf(matchedIndex);
+  if (matchedPosition < 0 || siblingIndices.length < 2) {
+    return candidate.excerpt.slice(0, EXCERPT_LIMIT);
+  }
+
+  const headerLines: string[] = [];
+  let headerLength = 0;
+  for (const line of lines) {
+    if (!line.startsWith('Title: ') && !line.startsWith('Kind: ') && !line.startsWith('Tags: ')) {
+      continue;
+    }
+    const added = line.length + (headerLines.length > 0 ? 1 : 0);
+    if (headerLength + added > EXCERPT_HEADER_LIMIT) continue;
+    headerLines.push(line);
+    headerLength += added;
+  }
+
+  const fieldBudget = EXCERPT_LIMIT - headerLength - (headerLines.length > 0 ? 1 : 0);
+  const matchedLine = lines[matchedIndex];
+  if (!matchedLine || matchedLine.length > fieldBudget) {
+    return candidate.excerpt.slice(0, EXCERPT_LIMIT);
+  }
+  const selected = new Set<number>([matchedIndex]);
+  let selectedLength = matchedLine.length;
+  for (let distance = 1; distance < siblingIndices.length; distance += 1) {
+    for (const position of [matchedPosition - distance, matchedPosition + distance]) {
+      const index = siblingIndices[position];
+      if (index === undefined || selected.has(index)) continue;
+      const line = lines[index];
+      if (line === undefined || selectedLength + line.length + 1 > fieldBudget) continue;
+      selected.add(index);
+      selectedLength += line.length + 1;
+    }
+  }
+  const fieldLines = [...selected]
+    .sort((left, right) => left - right)
+    .map((index) => lines[index])
+    .filter((line): line is string => line !== undefined);
+  return [...headerLines, ...fieldLines].join('\n');
+}
 
 function addRanking(
   candidates: Map<string, FusedCandidate>,
@@ -246,7 +301,7 @@ export class SearchEngine {
 
     const results: SearchResult[] = ordered.slice(0, topK).map((candidate) => ({
       memory: candidate.record,
-      excerpt: candidate.excerpt.slice(0, 2_000),
+      excerpt: contextualExcerpt(candidate),
       segmentPath: candidate.path,
       score: candidate.score,
     }));

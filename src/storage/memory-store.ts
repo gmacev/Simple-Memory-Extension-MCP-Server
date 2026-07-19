@@ -98,6 +98,7 @@ function canonicalRevisionPayload(
     kind: input.kind ?? null,
     metadata,
     observedAt: input.observedAt ?? null,
+    reviewAfter: input.reviewAfter ?? null,
     salience: input.salience ?? null,
     sources: (input.sources ?? []).map((source) => ({
       label: source.label ?? null,
@@ -385,8 +386,8 @@ export class MemoryStore {
         `INSERT INTO memory_revisions(
           id, memory_id, revision_number, parent_revision_id, title, kind, content_json,
           metadata_json, salience, confidence, observed_at, valid_from, valid_to, expires_at,
-          recorded_at, actor, content_hash, searchable_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          review_after, recorded_at, actor, content_hash, searchable_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         args.id,
@@ -403,6 +404,7 @@ export class MemoryStore {
         input.validFrom ?? null,
         input.validTo ?? null,
         input.expiresAt ?? null,
+        input.reviewAfter ?? null,
         args.recordedAt,
         args.actor,
         contentHash(canonicalRevisionPayload(input, args.tags, args.metadata)),
@@ -473,6 +475,7 @@ export class MemoryStore {
       validFrom: optionalString(row.valid_from),
       validTo: optionalString(row.valid_to),
       expiresAt: optionalString(row.expires_at),
+      reviewAfter: optionalString(row.review_after),
       recordedAt: String(row.recorded_at),
       actor: optionalString(row.actor),
       contentHash: String(row.content_hash),
@@ -802,10 +805,11 @@ export class MemoryStore {
     } else {
       clauses.push(`m.current_revision_id = ${revisionAlias}.id`);
     }
-    if (filters.validAt) {
+    const validityPoint = filters.validAt ?? (filters.atTime ? undefined : now());
+    if (validityPoint) {
       clauses.push(`(${revisionAlias}.valid_from IS NULL OR ${revisionAlias}.valid_from <= ?)`);
       clauses.push(`(${revisionAlias}.valid_to IS NULL OR ${revisionAlias}.valid_to > ?)`);
-      parameters.push(filters.validAt, filters.validAt);
+      parameters.push(validityPoint, validityPoint);
     }
     const expiryPoint = filters.atTime ?? now();
     clauses.push(`(${revisionAlias}.expires_at IS NULL OR ${revisionAlias}.expires_at > ?)`);

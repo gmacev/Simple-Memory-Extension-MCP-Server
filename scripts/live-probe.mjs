@@ -106,6 +106,7 @@ async function run() {
       },
     ],
     confidence: 0.95,
+    reviewAfter: '2000-01-01T00:00:00.000Z',
     idempotencyKey: 'probe-lease',
   });
   assert(lease.indexStatus === (modelsEnabled ? 'ready' : 'lexical-only'), 'expected index status');
@@ -119,6 +120,21 @@ async function run() {
     kind: 'preference',
     content: 'Vartotojas kelionėms renkasi ramius viešbučius netoli gamtos, ne miesto centre.',
     tags: ['lietuvių', 'kelionės'],
+  });
+
+  const structuredRate = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    title: 'Northline refrigerated delivery rate',
+    kind: 'commercial-term',
+    content: {
+      carrier: 'Northline Logistics',
+      price: {
+        amount: 18.25,
+        currency: 'EUR',
+        basis: 'per temperature-controlled pallet',
+      },
+    },
+    tags: ['procurement', 'cold-chain'],
   });
 
   const duplicate = await call(client, 'memory_create', {
@@ -148,6 +164,29 @@ async function run() {
   assert(
     lexical.results[0]?.isCurrentRevision === true,
     'current search result should identify itself as current',
+  );
+  assert(
+    lexical.results[0]?.reviewAfter === '2000-01-01T00:00:00.000Z',
+    'search should expose the optional review date',
+  );
+  assert(lexical.results[0]?.reviewDue === true, 'overdue review should be explicit');
+
+  const structuredRateSearch = await call(client, 'memory_search', {
+    query: 'temperature-controlled pallet',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  assert(
+    structuredRateSearch.results[0]?.id === structuredRate.id,
+    'structured rate search should retrieve the correct memory',
+  );
+  assert(
+    structuredRateSearch.results[0]?.segmentPath === '$/price/basis',
+    'structured rate probe should exercise a narrow matched field',
+  );
+  assert(
+    structuredRateSearch.results[0]?.excerpt.includes('$/price/amount: 18.25'),
+    'narrow field match should include answer-bearing sibling context',
   );
 
   const highConfidence = await call(client, 'memory_search', {
@@ -200,6 +239,15 @@ async function run() {
     !beforeValidity.results.some((item) => item.id === temporal.id),
     'valid-time search should exclude a future fact',
   );
+  const currentValidity = await call(client, 'memory_search', {
+    query: 'Mercury supplier rate card',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  assert(
+    !currentValidity.results.some((item) => item.id === temporal.id),
+    'ordinary search should enforce present-time validity',
+  );
   const duringValidity = await call(client, 'memory_search', {
     query: 'Mercury supplier rate card',
     spaceIds: ['live-probe'],
@@ -209,6 +257,33 @@ async function run() {
   assert(
     duringValidity.results[0]?.id === temporal.id,
     'valid-time search should include an applicable fact',
+  );
+  const pastTemporal = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    title: 'Legacy Atlas support window',
+    kind: 'commercial-term',
+    content: 'Atlas support was available during 2020 only.',
+    validFrom: '2020-01-01T00:00:00.000Z',
+    validTo: '2021-01-01T00:00:00.000Z',
+  });
+  const afterPastValidity = await call(client, 'memory_search', {
+    query: 'Legacy Atlas support window',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  assert(
+    !afterPastValidity.results.some((item) => item.id === pastTemporal.id),
+    'ordinary search should exclude information whose validity ended',
+  );
+  const duringPastValidity = await call(client, 'memory_search', {
+    query: 'Legacy Atlas support window',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+    validAt: '2020-06-01T00:00:00.000Z',
+  });
+  assert(
+    duringPastValidity.results[0]?.id === pastTemporal.id,
+    'explicit historical validity should recover ended information',
   );
 
   const firstPage = await call(client, 'memory_list', {
@@ -268,6 +343,7 @@ async function run() {
     },
     tags: ['operations', 'property'],
     sources: [{ uri: 'urn:probe:amendment-2', type: 'contract-amendment' }],
+    reviewAfter: '2999-01-01T00:00:00.000Z',
   });
   assert(revised.revision.revisionNumber === 2, 'revision number must advance');
 
@@ -283,6 +359,8 @@ async function run() {
   assert(history.revisions.length === 2, 'append-only history should retain both revisions');
   assert(history.revisions[0]?.content === undefined, 'history content should be opt-in');
   assert(history.revisions[0]?.contentHash === undefined, 'history should hide internal hashes');
+  assert(history.revisions[0]?.reviewDue === undefined, 'future review should not warn');
+  assert(history.revisions[1]?.reviewDue === true, 'historical overdue review should be retained');
   const detailedHistory = await call(client, 'memory_history', {
     memoryId: lease.id,
     includeContent: true,

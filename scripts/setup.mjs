@@ -79,15 +79,15 @@ function requireNode22() {
   }
 }
 
-function requireNpm11() {
+function requireNpm10() {
   const outcome = captured(npmCommand, npmArguments(['--version']));
   if (outcome.error || outcome.status !== 0) {
-    throw new Error('npm 11 or newer is required but npm could not be started');
+    throw new Error('npm 10 or newer is required but npm could not be started');
   }
   const version = outcome.stdout.trim();
   const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
-  if (!Number.isFinite(major) || major < 11) {
-    throw new Error(`npm 11 or newer is required; found ${version || 'an unknown version'}`);
+  if (!Number.isFinite(major) || major < 10) {
+    throw new Error(`npm 10 or newer is required; found ${version || 'an unknown version'}`);
   }
   return version;
 }
@@ -295,7 +295,7 @@ async function main() {
   const verificationDataDir = mkdtempSync(path.join(tmpdir(), `simple-memory-${mode}-`));
   try {
     requireNode22();
-    const npmVersion = requireNpm11();
+    const npmVersion = requireNpm10();
     heading(`Using Node ${process.version} and npm ${npmVersion}`);
     if (mode === 'update') {
       heading(

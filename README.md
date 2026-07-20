@@ -47,7 +47,7 @@ Model files are stored separately in the standard Hugging Face cache.
 Requirements:
 
 - Node.js 22.9 or newer
-- npm 11 or newer
+- npm 10 or newer
 - Internet access during the first model download
 
 Clone the repository and run the setup command:

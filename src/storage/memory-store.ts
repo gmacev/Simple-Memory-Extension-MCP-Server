@@ -11,17 +11,20 @@ import type {
   JsonObject,
   MemoryInput,
   MemoryLink,
+  MemoryLinkDirection,
   MemoryListFilters,
   MemoryListPage,
   MemoryRecord,
   MemoryRevision,
   MemoryState,
+  MemoryTraversalEntry,
+  MemoryTraversalPathStep,
   SegmentRecord,
   SourceInput,
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
-import { schemaSql } from './schema.js';
+import { applyMigrations, type MigrationStatus } from './migrations/index.js';
 
 type Row = Record<string, unknown>;
 
@@ -130,6 +133,7 @@ function canonicalRevisionPayload(
 
 export class MemoryStore {
   private readonly database: Database.Database;
+  private readonly migrations: MigrationStatus;
   public readonly vectorAvailable: boolean;
 
   public constructor(
@@ -141,7 +145,16 @@ export class MemoryStore {
     this.database.pragma('journal_mode = WAL');
     this.database.pragma('foreign_keys = ON');
     this.database.pragma('busy_timeout = 5000');
-    this.database.exec(schemaSql);
+    let vectorExtensionLoaded = false;
+    try {
+      sqliteVec.load(this.database);
+      vectorExtensionLoaded = true;
+    } catch (error) {
+      this.logger.warn('sqlite-vec unavailable; semantic search will degrade', {
+        error: String(error),
+      });
+    }
+    this.migrations = applyMigrations(this.database, config.databasePath, this.logger);
     this.database
       .prepare(
         `UPDATE index_jobs SET status = 'pending', updated_at = ?
@@ -150,8 +163,7 @@ export class MemoryStore {
       .run(now());
     this.ensureDefaultSpace();
     let vectorAvailable = false;
-    try {
-      sqliteVec.load(this.database);
+    if (vectorExtensionLoaded) {
       this.database.exec(
         `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
           segment_id TEXT PRIMARY KEY,
@@ -160,10 +172,6 @@ export class MemoryStore {
         )`,
       );
       vectorAvailable = true;
-    } catch (error) {
-      this.logger.warn('sqlite-vec unavailable; semantic search will degrade', {
-        error: String(error),
-      });
     }
     this.vectorAvailable = vectorAvailable;
   }
@@ -680,6 +688,57 @@ export class MemoryStore {
     return records;
   }
 
+  private getMemoriesByIdsAtTime(memoryIds: string[], atTime: string): Map<string, MemoryRecord> {
+    const uniqueMemoryIds = [...new Set(memoryIds)];
+    const records = new Map<string, MemoryRecord>();
+    if (uniqueMemoryIds.length === 0) return records;
+
+    const placeholders = uniqueMemoryIds.map(() => '?').join(',');
+    const rows = this.allRows(
+      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
+       FROM memories m
+       JOIN (
+         SELECT memory_id, MAX(revision_number) AS revision_number
+         FROM memory_revisions
+         WHERE memory_id IN (${placeholders}) AND recorded_at <= ?
+         GROUP BY memory_id
+       ) latest ON latest.memory_id = m.id
+       JOIN memory_revisions r
+         ON r.memory_id = latest.memory_id AND r.revision_number = latest.revision_number`,
+      ...uniqueMemoryIds,
+      atTime,
+    );
+    const relations = this.loadRevisionRelations(
+      rows.map((row) => String(row.revision_id)),
+    );
+    const statesByMemoryId = new Map<string, MemoryState>();
+    for (const row of this.allRows(
+      `SELECT event.memory_id, event.state
+       FROM memory_state_events event
+       JOIN (
+         SELECT memory_id, MAX(event_number) AS event_number
+         FROM memory_state_events
+         WHERE memory_id IN (${placeholders}) AND recorded_at <= ?
+         GROUP BY memory_id
+       ) latest
+         ON latest.memory_id = event.memory_id AND latest.event_number = event.event_number`,
+      ...uniqueMemoryIds,
+      atTime,
+    )) {
+      statesByMemoryId.set(
+        String(row.memory_id),
+        z.enum(['active', 'archived', 'deleted']).parse(row.state),
+      );
+    }
+    for (const row of rows) {
+      const memoryId = String(row.memory_record_id);
+      const state = statesByMemoryId.get(memoryId);
+      if (!state) continue;
+      records.set(memoryId, this.memoryFromJoinedRow(row, relations, state));
+    }
+    return records;
+  }
+
   public getHistory(memoryId: string): MemoryRevision[] {
     if (!this.database.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
       throw new Error(`Memory not found: ${memoryId}`);
@@ -1124,37 +1183,61 @@ export class MemoryStore {
       throw new Error('Deleted memories cannot be linked');
     }
     assertTemporalRange(input.validFrom, input.validTo);
-    const link: MemoryLink = {
-      id: randomUUID(),
-      spaceId: from.spaceId,
-      fromMemoryId: from.id,
-      toMemoryId: to.id,
-      relation: input.relation.trim(),
-      metadata: input.metadata ?? {},
-      validFrom: input.validFrom ?? null,
-      validTo: input.validTo ?? null,
-      createdAt: now(),
-      deletedAt: null,
-    };
-    this.database
-      .prepare(
-        `INSERT INTO memory_links(
-          id, space_id, from_memory_id, to_memory_id, relation, metadata_json,
-          valid_from, valid_to, created_at, deleted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-      )
-      .run(
-        link.id,
-        link.spaceId,
-        link.fromMemoryId,
-        link.toMemoryId,
-        link.relation,
-        stableStringify(link.metadata),
-        link.validFrom,
-        link.validTo,
-        link.createdAt,
+    const relation = input.relation.trim();
+    if (!relation) throw new Error('relation must contain non-whitespace text');
+    const metadata = input.metadata ?? {};
+    const metadataJson = stableStringify(metadata);
+    const validFrom = input.validFrom ?? null;
+    const validTo = input.validTo ?? null;
+    const create = this.database.transaction((): MemoryLink => {
+      const existing = this.getRow(
+        `SELECT * FROM memory_links
+         WHERE space_id = ? AND from_memory_id = ? AND to_memory_id = ?
+           AND relation = ? COLLATE NOCASE AND metadata_json = ?
+           AND valid_from IS ? AND valid_to IS ? AND deleted_at IS NULL
+         ORDER BY created_at, id LIMIT 1`,
+        from.spaceId,
+        from.id,
+        to.id,
+        relation,
+        metadataJson,
+        validFrom,
+        validTo,
       );
-    return link;
+      if (existing) return this.linkFromRow(existing);
+      const link: MemoryLink = {
+        id: randomUUID(),
+        spaceId: from.spaceId,
+        fromMemoryId: from.id,
+        toMemoryId: to.id,
+        relation,
+        metadata,
+        validFrom,
+        validTo,
+        createdAt: now(),
+        deletedAt: null,
+      };
+      this.database
+        .prepare(
+          `INSERT INTO memory_links(
+            id, space_id, from_memory_id, to_memory_id, relation, metadata_json,
+            valid_from, valid_to, created_at, deleted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          link.id,
+          link.spaceId,
+          link.fromMemoryId,
+          link.toMemoryId,
+          link.relation,
+          metadataJson,
+          link.validFrom,
+          link.validTo,
+          link.createdAt,
+        );
+      return link;
+    });
+    return create.immediate();
   }
 
   private linkFromRow(row: Row): MemoryLink {
@@ -1191,7 +1274,7 @@ export class MemoryStore {
              AND (deleted_at IS NULL OR deleted_at > ?)
              AND (valid_from IS NULL OR valid_from <= ?)
              AND (valid_to IS NULL OR valid_to > ?)
-           ORDER BY created_at`,
+           ORDER BY created_at, id`,
       memoryId,
       memoryId,
       atTime,
@@ -1201,32 +1284,123 @@ export class MemoryStore {
     ).map((row) => this.linkFromRow(row));
   }
 
-  public traverse(
-    memoryId: string,
-    maxDepth = 2,
-    atTime = now(),
-  ): Array<{ memory: MemoryRecord; depth: number; via: MemoryLink | null }> {
-    const boundedDepth = Math.max(0, Math.min(maxDepth, 5));
-    const output: Array<{ memory: MemoryRecord; depth: number; via: MemoryLink | null }> = [
-      { memory: this.getMemory(memoryId, { atTime }), depth: 0, via: null },
-    ];
-    const visited = new Set([memoryId]);
-    let frontier = [memoryId];
-    for (let depth = 1; depth <= boundedDepth; depth += 1) {
+  private linksForMany(
+    memoryIds: string[],
+    options: {
+      atTime: string;
+      relations: string[];
+      direction: MemoryLinkDirection;
+    },
+  ): Map<string, MemoryLink[]> {
+    const linksByMemoryId = new Map<string, MemoryLink[]>(
+      memoryIds.map((memoryId) => [memoryId, []]),
+    );
+    if (memoryIds.length === 0) return linksByMemoryId;
+    const placeholders = memoryIds.map(() => '?').join(',');
+    const endpointClause =
+      options.direction === 'outgoing'
+        ? `from_memory_id IN (${placeholders})`
+        : options.direction === 'incoming'
+          ? `to_memory_id IN (${placeholders})`
+          : `(from_memory_id IN (${placeholders}) OR to_memory_id IN (${placeholders}))`;
+    const endpointParameters =
+      options.direction === 'both' ? [...memoryIds, ...memoryIds] : memoryIds;
+    const relationClause =
+      options.relations.length > 0
+        ? `AND relation COLLATE NOCASE IN (${options.relations.map(() => '?').join(',')})`
+        : '';
+    const rows = this.allRows(
+      `SELECT * FROM memory_links
+       WHERE ${endpointClause}
+         AND created_at <= ?
+         AND (deleted_at IS NULL OR deleted_at > ?)
+         AND (valid_from IS NULL OR valid_from <= ?)
+         AND (valid_to IS NULL OR valid_to > ?)
+         ${relationClause}
+       ORDER BY created_at, id`,
+      ...endpointParameters,
+      options.atTime,
+      options.atTime,
+      options.atTime,
+      options.atTime,
+      ...options.relations,
+    );
+    for (const row of rows) {
+      const link = this.linkFromRow(row);
+      if (options.direction !== 'incoming' && linksByMemoryId.has(link.fromMemoryId)) {
+        linksByMemoryId.get(link.fromMemoryId)?.push(link);
+      }
+      if (
+        options.direction !== 'outgoing' &&
+        link.toMemoryId !== link.fromMemoryId &&
+        linksByMemoryId.has(link.toMemoryId)
+      ) {
+        linksByMemoryId.get(link.toMemoryId)?.push(link);
+      }
+    }
+    return linksByMemoryId;
+  }
+
+  public traverseCandidates(options: {
+    memoryId: string;
+    maxDepth: number;
+    atTime: string;
+    relations: string[];
+    direction: MemoryLinkDirection;
+    maxResults: number;
+  }): { items: MemoryTraversalEntry[]; truncated: boolean } {
+    this.getMemory(options.memoryId, { atTime: options.atTime });
+    const discoveries: Array<{
+      memoryId: string;
+      depth: number;
+      via: MemoryLink | null;
+      path: MemoryTraversalPathStep[];
+    }> = [{ memoryId: options.memoryId, depth: 0, via: null, path: [] }];
+    const paths = new Map<string, MemoryTraversalPathStep[]>([[options.memoryId, []]]);
+    const visited = new Set([options.memoryId]);
+    let frontier = [options.memoryId];
+    const targetCount = Math.max(1, options.maxResults) + 1;
+    let stoppedAtLimit = false;
+
+    traversal: for (let depth = 1; depth <= options.maxDepth; depth += 1) {
       const next: string[] = [];
+      const linksByMemoryId = this.linksForMany(frontier, options);
       for (const sourceId of frontier) {
-        for (const link of this.linksFor(sourceId, atTime)) {
-          const adjacent = link.fromMemoryId === sourceId ? link.toMemoryId : link.fromMemoryId;
+        for (const link of linksByMemoryId.get(sourceId) ?? []) {
+          const outgoing = link.fromMemoryId === sourceId;
+          const adjacent = outgoing ? link.toMemoryId : link.fromMemoryId;
           if (visited.has(adjacent)) continue;
           visited.add(adjacent);
           next.push(adjacent);
-          output.push({ memory: this.getMemory(adjacent, { atTime }), depth, via: link });
+          const step: MemoryTraversalPathStep = {
+            link,
+            direction: outgoing ? 'outgoing' : 'incoming',
+          };
+          const path = [...(paths.get(sourceId) ?? []), step];
+          paths.set(adjacent, path);
+          discoveries.push({ memoryId: adjacent, depth, via: link, path });
+          if (discoveries.length >= targetCount) {
+            stoppedAtLimit = true;
+            break traversal;
+          }
         }
       }
       frontier = next;
       if (frontier.length === 0) break;
     }
-    return output;
+
+    const selected = discoveries.slice(0, options.maxResults);
+    const records = this.getMemoriesByIdsAtTime(
+      selected.map((entry) => entry.memoryId),
+      options.atTime,
+    );
+    return {
+      items: selected.flatMap((entry) => {
+        const memory = records.get(entry.memoryId);
+        return memory ? [{ memory, depth: entry.depth, via: entry.via, path: entry.path }] : [];
+      }),
+      truncated: stoppedAtLimit,
+    };
   }
 
   public recordFeedback(input: {
@@ -1284,6 +1458,7 @@ export class MemoryStore {
     );
     return {
       database: this.database.name,
+      schemaVersion: this.migrations.toVersion,
       vectorAvailable: this.vectorAvailable,
       memories: counts,
       spaces: Number(spaceCount.count),
@@ -1292,6 +1467,13 @@ export class MemoryStore {
       stateEvents: Number(stateEventCount.count),
       modelProfiles: Number(modelProfileCount.count),
       pendingJobs: Number(pendingCount.count),
+    };
+  }
+
+  public migrationStatus(): MigrationStatus {
+    return {
+      ...this.migrations,
+      applied: this.migrations.applied.map((migration) => ({ ...migration })),
     };
   }
 

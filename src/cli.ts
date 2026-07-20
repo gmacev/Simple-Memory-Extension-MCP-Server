@@ -60,6 +60,10 @@ async function main(): Promise<void> {
       );
       return;
     }
+    if (command === 'migrate') {
+      print(service.migrationStatus());
+      return;
+    }
     if (command === 'reindex') {
       print(await service.reindexAll());
       return;
@@ -80,7 +84,7 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error(
-      'Usage: memoryctl doctor | model fetch | reindex | export [file] | compact | purge --deleted',
+      'Usage: memoryctl doctor | model fetch | migrate | reindex | export [file] | compact | purge --deleted',
     );
   } finally {
     await service.close();

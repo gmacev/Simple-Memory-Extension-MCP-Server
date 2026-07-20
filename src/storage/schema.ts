@@ -1,3 +1,4 @@
+// Migration 1 is append-only. Add schema changes through a new migration instead of editing this SQL.
 export const schemaSql = `
 PRAGMA foreign_keys = ON;
 

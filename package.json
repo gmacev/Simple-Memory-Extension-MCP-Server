@@ -16,7 +16,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "setup": "node scripts/setup.mjs",
+    "setup": "node scripts/setup.mjs setup",
+    "update": "node scripts/setup.mjs update",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/index.ts",
@@ -39,7 +40,7 @@
   "author": "gmacev",
   "license": "MIT",
   "engines": {
-    "node": ">=24.0.0",
+    "node": ">=22.9.0",
     "npm": ">=11.0.0"
   },
   "dependencies": {
@@ -52,7 +53,7 @@
     "@biomejs/biome": "2.5.4",
     "@types/better-sqlite3": "7.6.13",
     "@types/express": "5.0.6",
-    "@types/node": "24.13.3",
+    "@types/node": "22.20.1",
     "tsx": "4.23.1",
     "typescript": "7.0.2"
   },

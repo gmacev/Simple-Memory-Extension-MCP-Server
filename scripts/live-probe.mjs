@@ -541,7 +541,7 @@ async function run() {
   });
   const traversal = await call(client, 'memory_traverse', { memoryId: lease.id, maxDepth: 2 });
   assert(
-    traversal.some((entry) => entry.memory.id === preference.id),
+    traversal.items.some((entry) => entry.memory.id === preference.id),
     'graph traversal',
   );
   await call(client, 'memory_feedback', {
@@ -701,7 +701,7 @@ async function run() {
     maxDepth: 2,
   });
   assert(
-    !afterDeleteTraversal.some((entry) => entry.memory.id === disposable.id),
+    !afterDeleteTraversal.items.some((entry) => entry.memory.id === disposable.id),
     'permanent deletion should remove relationships',
   );
   const rowsAfterDeletion = deletionRowCounts(

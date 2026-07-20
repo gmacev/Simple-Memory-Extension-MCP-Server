@@ -46,7 +46,7 @@ Model files are stored separately in the standard Hugging Face cache.
 
 Requirements:
 
-- Node.js 24 or newer
+- Node.js 22.9 or newer
 - npm 11 or newer
 - Internet access during the first model download
 
@@ -76,6 +76,17 @@ tool_timeout_sec = 900
 ```
 
 Replace `cwd` with the absolute path to the cloned repository. The MCP client starts the server automatically; `npm start` does not need to run separately.
+
+## Updating
+
+Completely stop the MCP client that is using Simple Memory, then update the repository and installation. The server must not be running because loaded native dependencies may need to be replaced:
+
+```bash
+git pull
+npm run update
+```
+
+Restart the MCP client afterward.
 
 ## Environment variables
 
@@ -124,7 +135,7 @@ All configuration is optional.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `SIMPLE_MEMORY_TORCH_BACKEND` | PyTorch backend selected during setup | Automatically detected |
+| `SIMPLE_MEMORY_TORCH_BACKEND` | PyTorch backend selected during setup or update | Automatically detected |
 | `SIMPLE_MEMORY_UV` | Path to a specific `uv` executable | Automatically located |
 | `SIMPLE_MEMORY_PYTHON` | Path to the Python executable used by the server | Bundled virtual environment |
 | `SIMPLE_MEMORY_PYTHON_PROJECT` | Path to the model-runtime project | Repository `python` directory |
@@ -146,9 +157,9 @@ Standard Hugging Face variables such as `HF_HOME` can also be used to relocate t
 | `memory_archive` | Reversibly remove a memory from normal recall while preserving it. |
 | `memory_restore` | Return an archived memory to normal recall. |
 | `memory_delete` | Permanently erase a memory and all related data. |
-| `memory_link` | Create a relationship between memories. |
+| `memory_link` | Idempotently create a relationship between memories. |
 | `memory_unlink` | Remove a relationship. |
-| `memory_traverse` | Explore connected memories. |
+| `memory_traverse` | Explore connected memories with paths, filters, ranking, and pagination. |
 | `memory_feedback` | Record usefulness, correctness, verification, or staleness feedback. |
 | `memory_status` | Inspect storage, indexing, and model health. |
 

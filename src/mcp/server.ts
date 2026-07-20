@@ -549,7 +549,8 @@ export function buildMcpServer(service: MemoryService): McpServer {
     'memory_link',
     {
       title: 'Link memories',
-      description: 'Create a typed, arbitrary relationship between two memories in the same space.',
+      description:
+        'Create a typed, arbitrary relationship between two memories in the same space. Repeating an identical active relationship safely returns the existing link instead of creating a duplicate.',
       inputSchema: {
         fromMemoryId: z.string().uuid(),
         toMemoryId: z.string().uuid(),
@@ -558,7 +559,7 @@ export function buildMcpServer(service: MemoryService): McpServer {
         validFrom: dateSchema.optional(),
         validTo: dateSchema.optional(),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async (args) =>
       result(
@@ -588,22 +589,60 @@ export function buildMcpServer(service: MemoryService): McpServer {
     'memory_traverse',
     {
       title: 'Traverse memory relationships',
-      description: 'Traverse explicit memory links up to a bounded depth.',
+      description:
+        'Explore a bounded, paginated subgraph of explicit memory relationships. Filter by relationship and direction, or provide a query to rank the connected memories by relevance. Results include complete relationship paths. When continuing with nextCursor, keep query, relationships, direction, and maxDepth unchanged.',
       inputSchema: {
         memoryId: z.string().uuid(),
         maxDepth: z.number().int().min(0).max(5).optional(),
         atTime: dateSchema.optional(),
+        relations: z.array(z.string().min(1).max(200)).max(50).optional(),
+        direction: z.enum(['outgoing', 'incoming', 'both']).optional(),
+        query: z.string().min(1).max(10_000).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+        cursor: z.string().max(2_000).optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     },
-    async ({ memoryId, maxDepth, atTime }) =>
-      result(
-        service.traverse(memoryId, maxDepth, atTime).map((entry) => ({
+    async (args) => {
+      const page = await service.traverse({
+        memoryId: args.memoryId,
+        ...(args.maxDepth !== undefined ? { maxDepth: args.maxDepth } : {}),
+        ...(args.atTime ? { atTime: args.atTime } : {}),
+        ...(args.relations ? { relations: args.relations } : {}),
+        ...(args.direction ? { direction: args.direction } : {}),
+        ...(args.query ? { query: args.query } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        ...(args.cursor ? { cursor: args.cursor } : {}),
+      });
+      return result({
+        items: page.items.map((entry) => ({
           memory: memorySummary(entry.memory),
           depth: entry.depth,
           via: entry.via,
+          path: entry.path.map((step) => ({
+            linkId: step.link.id,
+            relation: step.link.relation,
+            direction: step.direction,
+            fromMemoryId: step.link.fromMemoryId,
+            toMemoryId: step.link.toMemoryId,
+            ...(step.link.validFrom ? { validFrom: step.link.validFrom } : {}),
+            ...(step.link.validTo ? { validTo: step.link.validTo } : {}),
+          })),
+          ...(entry.relevanceScore !== undefined
+            ? { relevanceScore: entry.relevanceScore }
+            : {}),
+          ...(entry.rerankerScore !== undefined
+            ? { rerankerScore: entry.rerankerScore }
+            : {}),
         })),
-      ),
+        nextCursor: page.nextCursor,
+        truncated: page.truncated,
+        atTime: page.atTime,
+        degraded: page.degraded,
+        ...(page.query ? { query: page.query } : {}),
+        ...(page.degradationReason ? { degradationReason: page.degradationReason } : {}),
+      });
+    },
   );
 
   server.registerTool(

@@ -133,6 +133,43 @@ export interface MemoryLink {
   deletedAt: string | null;
 }
 
+export type MemoryLinkDirection = 'outgoing' | 'incoming' | 'both';
+
+export interface MemoryTraversalOptions {
+  memoryId: string;
+  maxDepth?: number;
+  atTime?: string;
+  relations?: string[];
+  direction?: MemoryLinkDirection;
+  query?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface MemoryTraversalPathStep {
+  link: MemoryLink;
+  direction: Exclude<MemoryLinkDirection, 'both'>;
+}
+
+export interface MemoryTraversalEntry {
+  memory: MemoryRecord;
+  depth: number;
+  via: MemoryLink | null;
+  path: MemoryTraversalPathStep[];
+  relevanceScore?: number;
+  rerankerScore?: number;
+}
+
+export interface MemoryTraversalPage {
+  items: MemoryTraversalEntry[];
+  nextCursor: string | null;
+  truncated: boolean;
+  atTime: string;
+  query?: string;
+  degraded: boolean;
+  degradationReason?: string;
+}
+
 export interface SegmentRecord {
   id: string;
   memoryId: string;

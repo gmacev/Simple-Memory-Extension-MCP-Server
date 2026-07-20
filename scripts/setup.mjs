@@ -6,6 +6,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const mode = process.argv.slice(2).find((argument) => !argument.startsWith('--')) ?? 'setup';
+if (mode !== 'setup' && mode !== 'update') {
+  throw new Error(`Expected installation mode setup or update; received ${mode}`);
+}
 const skipModels = process.argv.includes('--skip-models');
 const npmCliPath = process.env.npm_execpath;
 const npmCommand = npmCliPath ? process.execPath : 'npm';
@@ -15,7 +19,7 @@ function npmArguments(arguments_) {
 }
 
 function heading(message) {
-  process.stdout.write(`\n[simple-memory setup] ${message}\n`);
+  process.stdout.write(`\n[simple-memory ${mode}] ${message}\n`);
 }
 
 function run(label, command, args, options = {}) {
@@ -33,7 +37,7 @@ function run(label, command, args, options = {}) {
   if (outcome.status !== 0) {
     if (label === 'Install locked Node dependencies') {
       throw new Error(
-        `${label} failed. If Simple Memory is already registered, close or disable its MCP client so native dependencies are not held open, then rerun setup`,
+        `${label} failed. Stop any MCP client using Simple Memory, then rerun npm run ${mode}; loaded native dependencies cannot be replaced while the server is running`,
       );
     }
     throw new Error(`${label} failed with exit code ${String(outcome.status)}`);
@@ -61,10 +65,17 @@ function captured(command, args, options = {}) {
   });
 }
 
-function requireNode24() {
-  const major = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
-  if (!Number.isFinite(major) || major < 24) {
-    throw new Error(`Node.js 24 or newer is required; found ${process.version}`);
+function requireNode22() {
+  const [majorText = '0', minorText = '0'] = process.versions.node.split('.');
+  const major = Number.parseInt(majorText, 10);
+  const minor = Number.parseInt(minorText, 10);
+  if (
+    !Number.isFinite(major) ||
+    !Number.isFinite(minor) ||
+    major < 22 ||
+    (major === 22 && minor < 9)
+  ) {
+    throw new Error(`Node.js 22.9 or newer is required; found ${process.version}`);
   }
 }
 
@@ -281,11 +292,16 @@ function installPreferredTorchBackend(uv) {
 }
 
 async function main() {
-  const verificationDataDir = mkdtempSync(path.join(tmpdir(), 'simple-memory-setup-'));
+  const verificationDataDir = mkdtempSync(path.join(tmpdir(), `simple-memory-${mode}-`));
   try {
-    requireNode24();
+    requireNode22();
     const npmVersion = requireNpm11();
     heading(`Using Node ${process.version} and npm ${npmVersion}`);
+    if (mode === 'update') {
+      heading(
+        'Prerequisite: MCP clients using Simple Memory must be stopped while dependencies are updated',
+      );
+    }
     run('Install locked Node dependencies', npmCommand, npmArguments(['ci']));
     const uv = locateUv() ?? (await installUv());
     run('Synchronize locked Python model environment', uv, [
@@ -304,6 +320,17 @@ async function main() {
       retryDelay: 250,
     });
     run('Build the MCP server', npmCommand, npmArguments(['run', 'build']));
+    run(
+      'Apply pending memory database migrations',
+      process.execPath,
+      [path.join(root, 'dist', 'cli.js'), 'migrate'],
+      {
+        env: {
+          ...process.env,
+          SIMPLE_MEMORY_MODELS: 'disabled',
+        },
+      },
+    );
     if (skipModels) {
       heading('Skipping model prefetch because --skip-models was supplied');
     } else {
@@ -333,10 +360,12 @@ async function main() {
         },
       },
     );
-    heading('Setup complete. MCP clients can launch: node dist/index.js');
+    heading(
+      `${mode === 'setup' ? 'Setup' : 'Update'} complete. Restart MCP clients that use Simple Memory.`,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`\n[simple-memory setup] ERROR: ${message}\n`);
+    process.stderr.write(`\n[simple-memory ${mode}] ERROR: ${message}\n`);
     process.exitCode = 1;
   } finally {
     rmSync(verificationDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });

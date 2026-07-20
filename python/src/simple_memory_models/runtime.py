@@ -219,7 +219,7 @@ class ModelRuntime:
     def model_info(self) -> dict[str, object]:
         embedding_dimension: int | None = None
         if self._embedding is not None:
-            embedding_dimension = self._embedding.get_sentence_embedding_dimension()
+            embedding_dimension = self._embedding.get_embedding_dimension()
         return {
             "embedding_model": self.config.embedding_model,
             "embedding_revision": self.config.embedding_revision,

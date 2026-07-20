@@ -53,10 +53,12 @@ export class ModelClient {
   private starts = 0;
   private actualWorkerPid: number | null = null;
   private embeddingProfilePromise: Promise<EmbeddingModelProfile> | null = null;
+  private stopping = false;
 
   public constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
+    private readonly forwardWorkerStderr = false,
   ) {}
 
   public get processStarts(): number {
@@ -86,11 +88,16 @@ export class ModelClient {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    this.stopping = false;
     this.process = child;
     this.starts += 1;
     this.lines = createInterface({ input: child.stdout });
     this.lines.on('line', (line) => this.handleLine(line));
     child.stderr.on('data', (chunk: Buffer) => {
+      if (this.forwardWorkerStderr) {
+        process.stderr.write(chunk);
+        return;
+      }
       const message = chunk.toString('utf8').trim();
       if (message) this.logger.debug('model-worker', message);
     });
@@ -133,13 +140,19 @@ export class ModelClient {
 
   private handleExit(error: Error): void {
     if (!this.process) return;
-    this.logger.warn('Model worker stopped', { error: error.message });
+    const expected = this.stopping;
+    this.stopping = false;
+    if (expected) {
+      this.logger.debug('Model worker stopped normally');
+    } else {
+      this.logger.warn('Model worker stopped', { error: error.message });
+    }
     this.lines?.close();
     this.lines = null;
     this.process = null;
     this.actualWorkerPid = null;
     this.embeddingProfilePromise = null;
-    this.noteFailure();
+    if (!expected) this.noteFailure();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -250,6 +263,7 @@ export class ModelClient {
   public async stop(): Promise<void> {
     const child = this.process;
     if (!child) return;
+    this.stopping = true;
     try {
       await this.request('shutdown');
       await this.waitForExit(child);

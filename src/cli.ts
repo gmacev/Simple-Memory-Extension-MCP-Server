@@ -8,22 +8,56 @@ function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function withModelProgress<T>(
+  operation: (reportProgress: (message: string) => void) => Promise<T>,
+): Promise<T> {
+  let currentStage = 'Starting model worker';
+  let stageStartedAt = Date.now();
+  const reportProgress = (message: string): void => {
+    currentStage = message;
+    stageStartedAt = Date.now();
+    process.stderr.write(`[simple-memory models] ${message}\n`);
+  };
+  const heartbeat = setInterval(() => {
+    const elapsedSeconds = Math.floor((Date.now() - stageStartedAt) / 1_000);
+    process.stderr.write(
+      `[simple-memory models] Still working: ${currentStage} (${String(elapsedSeconds)}s elapsed)\n`,
+    );
+  }, 15_000);
+  heartbeat.unref();
+  try {
+    return await operation(reportProgress);
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
 async function main(): Promise<void> {
   const [, , command = 'doctor', subcommand, argument] = process.argv;
   const config = loadConfig();
-  const service = createMemoryService(config);
+  const showsModelProgress =
+    (command === 'doctor' && config.modelsEnabled) ||
+    (command === 'model' && subcommand === 'fetch');
+  const service = createMemoryService(config, { forwardModelStderr: showsModelProgress });
   try {
     if (command === 'doctor') {
       const status = await service.status(false);
       print(
         config.modelsEnabled
-          ? { ...status, modelProbe: await service.warmModels() }
+          ? {
+              ...status,
+              modelProbe: await withModelProgress((reportProgress) =>
+                service.warmModels(reportProgress),
+              ),
+            }
           : { ...status, modelProbe: { skipped: 'models disabled' } },
       );
       return;
     }
     if (command === 'model' && subcommand === 'fetch') {
-      print(await service.warmModels());
+      print(
+        await withModelProgress((reportProgress) => service.warmModels(reportProgress)),
+      );
       return;
     }
     if (command === 'reindex') {

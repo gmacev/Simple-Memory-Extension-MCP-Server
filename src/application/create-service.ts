@@ -6,10 +6,13 @@ import { SearchEngine } from '../retrieval/search-engine.js';
 import { MemoryStore } from '../storage/memory-store.js';
 import { MemoryService } from './memory-service.js';
 
-export function createMemoryService(config: AppConfig): MemoryService {
+export function createMemoryService(
+  config: AppConfig,
+  options: { forwardModelStderr?: boolean } = {},
+): MemoryService {
   const logger = new Logger(config.logLevel);
   const store = new MemoryStore(config, logger);
-  const models = new ModelClient(config, logger);
+  const models = new ModelClient(config, logger, options.forwardModelStderr ?? false);
   const indexer = new Indexer(config, store, models, logger);
   const search = new SearchEngine(config, store, models, logger);
   return new MemoryService(config, store, indexer, search, models, logger);

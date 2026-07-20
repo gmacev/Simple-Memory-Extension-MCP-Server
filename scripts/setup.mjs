@@ -312,29 +312,14 @@ async function main() {
         ...process.env,
         SIMPLE_MEMORY_DATA_DIR: verificationDataDir,
         SIMPLE_MEMORY_MODELS: 'enabled',
+        SIMPLE_MEMORY_LOCAL_FILES_ONLY: 'false',
       };
-      heading('Check and verify pinned Qwen models from the local cache');
-      const cacheCheck = captured(process.execPath, modelCommand, {
-        env: {
-          ...modelEnvironment,
-          SIMPLE_MEMORY_LOCAL_FILES_ONLY: 'true',
-        },
-      });
-      if (!cacheCheck.error && cacheCheck.status === 0) {
-        heading('Both Qwen models are already cached; no download was needed');
-      } else {
-        run(
-          'Fetch missing Qwen model files and verify both models',
-          process.execPath,
-          modelCommand,
-          {
-            env: {
-              ...modelEnvironment,
-              SIMPLE_MEMORY_LOCAL_FILES_ONLY: 'false',
-            },
-          },
-        );
-      }
+      run(
+        'Prepare and verify pinned Qwen models (cached files are reused)',
+        process.execPath,
+        modelCommand,
+        { env: modelEnvironment },
+      );
     }
     run(
       'Run final environment doctor',

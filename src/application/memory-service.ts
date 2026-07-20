@@ -153,11 +153,18 @@ export class MemoryService {
     return { queued, ...(await this.indexer.indexPending()) };
   }
 
-  public async warmModels(): Promise<Record<string, unknown>> {
+  public async warmModels(
+    reportProgress: (message: string) => void = () => undefined,
+  ): Promise<Record<string, unknown>> {
+    reportProgress('Loading the embedding model; missing files will be downloaded');
     const embedding = await this.models.embedQuery('Simple Memory model readiness probe');
+    reportProgress(`Embedding model ready (${String(embedding.length)} dimensions)`);
+    reportProgress('Loading the reranker model; missing files will be downloaded');
     const reranker = await this.models.rerank('memory readiness', [
       'This candidate describes memory readiness.',
     ]);
+    reportProgress('Reranker model ready');
+    reportProgress('Verifying model runtime health');
     return {
       health: await this.models.health(),
       embeddingDimensions: embedding.length,

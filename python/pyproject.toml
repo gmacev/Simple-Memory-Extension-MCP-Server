@@ -5,8 +5,12 @@ description = "Persistent Qwen embedding and reranking worker for Simple Memory"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "sentence-transformers>=5.6.0,<6",
-  "torch>=2.7,<3",
-  "transformers>=4.51,<6",
+  # PyTorch 2.2 is the final release that published Python 3.12 wheels for Intel macOS.
+  "numpy>=1.26.4,<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "torch>=2.2,<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "torch>=2.7,<3; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "transformers>=4.51,<5; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "transformers>=4.51,<6; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 
 [project.scripts]

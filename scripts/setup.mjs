@@ -171,6 +171,19 @@ function pythonExecutablePath() {
 
 function selectTorchBackend() {
   const override = process.env.SIMPLE_MEMORY_TORCH_BACKEND?.trim();
+  if (process.platform === 'darwin') {
+    if (override && override !== 'auto' && override !== 'cpu') {
+      throw new Error(
+        `SIMPLE_MEMORY_TORCH_BACKEND=${override} is not supported on macOS; use auto or cpu`,
+      );
+    }
+    return {
+      backend: undefined,
+      expectsAccelerator: false,
+      reason: 'the standard macOS PyTorch wheel provides Apple MPS with CPU fallback',
+    };
+  }
+
   if (override) {
     return {
       backend: override,
@@ -209,28 +222,32 @@ function selectTorchBackend() {
 
 function installPreferredTorchBackend(uv) {
   const python = pythonExecutablePath();
-  const versionResult = captured(python, [
-    '-c',
-    'from importlib.metadata import version; print(version("torch").split("+")[0])',
-  ]);
-  if (versionResult.error || versionResult.status !== 0) {
-    throw new Error('Could not determine the locked PyTorch version after uv sync');
-  }
-  const torchVersion = versionResult.stdout.trim();
   const selection = selectTorchBackend();
-  run(`Install GPU-preferred PyTorch backend ${selection.backend} (${selection.reason})`, uv, [
-    'pip',
-    'install',
-    '--python',
-    python,
-    '--torch-backend',
-    selection.backend,
-    '--reinstall-package',
-    'torch',
-    '--only-binary',
-    'torch',
-    `torch==${torchVersion}`,
-  ]);
+  if (selection.backend) {
+    const versionResult = captured(python, [
+      '-c',
+      'from importlib.metadata import version; print(version("torch").split("+")[0])',
+    ]);
+    if (versionResult.error || versionResult.status !== 0) {
+      throw new Error('Could not determine the locked PyTorch version after uv sync');
+    }
+    const torchVersion = versionResult.stdout.trim();
+    run(`Install GPU-preferred PyTorch backend ${selection.backend} (${selection.reason})`, uv, [
+      'pip',
+      'install',
+      '--python',
+      python,
+      '--torch-backend',
+      selection.backend,
+      '--reinstall-package',
+      'torch',
+      '--only-binary',
+      'torch',
+      `torch==${torchVersion}`,
+    ]);
+  } else {
+    heading(`Use platform PyTorch installation (${selection.reason})`);
+  }
 
   const probe = captured(python, [
     '-c',
@@ -245,7 +262,7 @@ function installPreferredTorchBackend(uv) {
     ].join('; '),
   ]);
   if (probe.error || probe.status !== 0) {
-    throw new Error(`PyTorch backend ${selection.backend} installed but could not be imported`);
+    throw new Error('PyTorch was installed but could not be imported');
   }
   const health = JSON.parse(probe.stdout);
   if (selection.expectsAccelerator && health.accelerator !== true) {
@@ -253,7 +270,14 @@ function installPreferredTorchBackend(uv) {
       `PyTorch backend ${selection.backend} installed, but no compatible accelerator is available`,
     );
   }
-  heading(`PyTorch ${health.torch} ready; accelerator available: ${String(health.accelerator)}`);
+  const accelerator = health.cuda
+    ? 'CUDA'
+    : health.xpu
+      ? 'Intel XPU'
+      : health.mps
+        ? 'Apple MPS'
+        : 'CPU';
+  heading(`PyTorch ${health.torch} ready; selected runtime: ${accelerator}`);
 }
 
 async function main() {

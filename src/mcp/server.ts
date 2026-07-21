@@ -457,7 +457,7 @@ export function buildMcpServer(service: MemoryService): McpServer {
     {
       title: 'Search memories',
       description:
-        'Search current memory evidence with structured filters. Ordinary search excludes information outside its validFrom and validTo window; validAt selects another real-world validity time, while atTime selects what the system had recorded at another time. auto is the normal default; quality is hybrid retrieval plus Qwen reranking; fast skips reranking; semantic is raw vector retrieval; lexical uses no models.',
+        'Search current memory evidence with structured filters. Ordinary search excludes information outside its validFrom and validTo window; validAt selects another real-world validity time, while atTime selects what the system had recorded at another time. Mode guidance: auto is the recommended default and combines exact, full-text, and embedding retrieval, then reranks when multiple candidates are found; fast uses the same hybrid retrieval without reranking; quality uses hybrid retrieval and always attempts Qwen reranking; lexical uses exact and full-text retrieval without models; semantic uses exact and embedding retrieval without full-text retrieval or reranking.',
       inputSchema: {
         query: z.string().min(1).max(10_000),
         spaceIds: z.array(z.string()).max(100).optional(),

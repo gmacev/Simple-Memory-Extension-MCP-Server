@@ -4,6 +4,18 @@ export type JsonObject = { [key: string]: JsonValue };
 
 export type MemoryState = 'active' | 'archived' | 'deleted';
 export type IndexStatus = 'pending' | 'ready' | 'lexical-only' | 'failed';
+export type FeedbackScope = 'content' | 'retrieval';
+export type StoredFeedbackScope = FeedbackScope | 'legacy';
+export type ContentFeedbackSignal =
+  | 'verified'
+  | 'correct'
+  | 'incorrect'
+  | 'stale'
+  | 'contradicted';
+export type RetrievalFeedbackSignal = 'relevant' | 'irrelevant' | 'helpful' | 'not_helpful';
+export type FeedbackSignal = ContentFeedbackSignal | RetrievalFeedbackSignal;
+export type FeedbackActorType = 'user' | 'agent' | 'system' | 'external';
+export type FeedbackStatus = 'unreviewed' | 'supported' | 'verified' | 'needs-review';
 
 export interface SourceInput {
   uri?: string;
@@ -64,6 +76,59 @@ export interface MemoryRecord {
   currentRevisionId: string;
   indexStatus: IndexStatus;
   revision: MemoryRevision;
+  feedbackSummary: FeedbackSummary;
+}
+
+export interface FeedbackSummary {
+  revisionId: string;
+  feedbackStatus: FeedbackStatus;
+  latestSignal: ContentFeedbackSignal | null;
+  latestActorType: FeedbackActorType | null;
+  latestAt: string | null;
+  contentEventCount: number;
+  retrievalEventCount: number;
+}
+
+export interface MemoryFeedbackInput {
+  memoryId: string;
+  revisionId?: string;
+  scope: FeedbackScope;
+  signal: FeedbackSignal;
+  actorType: FeedbackActorType;
+  actorId?: string;
+  query?: string;
+  note?: string;
+  metadata?: JsonObject;
+  idempotencyKey?: string;
+}
+
+export interface MemoryFeedback {
+  id: string;
+  memoryId: string;
+  revisionId: string | null;
+  scope: StoredFeedbackScope;
+  signal: string;
+  actorType: FeedbackActorType | null;
+  actorId: string | null;
+  query: string | null;
+  value: number | null;
+  note: string | null;
+  metadata: JsonObject;
+  createdAt: string;
+}
+
+export interface MemoryFeedbackListFilters {
+  memoryId: string;
+  revisionId?: string;
+  scope?: StoredFeedbackScope;
+  atTime?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface MemoryFeedbackListPage {
+  items: MemoryFeedback[];
+  nextCursor: string | null;
 }
 
 export interface MemoryListFilters {
@@ -71,6 +136,7 @@ export interface MemoryListFilters {
   state?: MemoryState;
   kind?: string;
   tags?: string[];
+  feedbackStatus?: FeedbackStatus;
   limit?: number;
   cursor?: string;
 }

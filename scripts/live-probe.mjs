@@ -163,6 +163,7 @@ async function run() {
     'memory_link',
     'memory_traverse',
     'memory_feedback',
+    'memory_feedback_list',
     'memory_status',
     'memory_archive',
     'memory_restore',
@@ -544,12 +545,200 @@ async function run() {
     traversal.items.some((entry) => entry.memory.id === preference.id),
     'graph traversal',
   );
-  await call(client, 'memory_feedback', {
+  const verifiedFeedback = await call(client, 'memory_feedback', {
     memoryId: lease.id,
+    scope: 'content',
     signal: 'verified',
-    value: 1,
+    actorType: 'system',
     note: 'Verified by live MCP probe',
+    idempotencyKey: 'live-probe-verified-feedback',
   });
+  assert(verifiedFeedback.revisionId === revised.revision.id, 'feedback should target revision');
+  const feedbackRead = await call(client, 'memory_feedback_list', {
+    memoryId: lease.id,
+    revisionId: revised.revision.id,
+    includeDetails: true,
+  });
+  assert(feedbackRead.items[0]?.signal === 'verified', 'feedback should be readable');
+
+  const feedbackFixture = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    title: 'Revision-aware feedback fixture',
+    kind: 'feedback-probe',
+    content: { marker: 'revision-aware-feedback-probe', version: 1 },
+    tags: ['feedback-probe'],
+  });
+  const beforeConcern = new Date().toISOString();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const concern = await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    scope: 'content',
+    signal: 'incorrect',
+    actorType: 'user',
+    note: 'The user corrected this revision.',
+    metadata: { test: true },
+    idempotencyKey: 'feedback-probe-concern',
+  });
+  assert(concern.revisionId === feedbackFixture.revision.id, 'content feedback current revision');
+  const concerned = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
+  assert(
+    concerned.feedbackSummary.feedbackStatus === 'needs-review',
+    'incorrect feedback should require review',
+  );
+  const beforeConcernRead = await call(client, 'memory_get', {
+    memoryId: feedbackFixture.id,
+    atTime: beforeConcern,
+  });
+  assert(
+    beforeConcernRead.feedbackSummary.feedbackStatus === 'unreviewed',
+    'historical read must exclude future feedback',
+  );
+  const feedbackRevision = await call(client, 'memory_revise', {
+    memoryId: feedbackFixture.id,
+    expectedRevisionId: feedbackFixture.revision.id,
+    title: 'Revision-aware feedback fixture',
+    kind: 'feedback-probe',
+    content: { marker: 'revision-aware-feedback-probe', version: 2 },
+    tags: ['feedback-probe'],
+  });
+  const retriedConcern = await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    scope: 'content',
+    signal: 'incorrect',
+    actorType: 'user',
+    note: 'The user corrected this revision.',
+    metadata: { test: true },
+    idempotencyKey: 'feedback-probe-concern',
+  });
+  assert(retriedConcern.id === concern.id, 'feedback retry should return original event');
+  assert(
+    retriedConcern.revisionId === feedbackFixture.revision.id,
+    'feedback retry should retain original revision',
+  );
+  await expectToolError(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    scope: 'content',
+    signal: 'stale',
+    actorType: 'user',
+    idempotencyKey: 'feedback-probe-concern',
+  });
+  const cleanRevision = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
+  assert(
+    cleanRevision.revision.id === feedbackRevision.revision.id &&
+      cleanRevision.feedbackSummary.feedbackStatus === 'unreviewed',
+    'new revision should not inherit old feedback',
+  );
+  await expectToolError(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    scope: 'retrieval',
+    signal: 'relevant',
+    actorType: 'agent',
+    query: 'revision-aware feedback probe',
+  });
+  await expectToolError(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    revisionId: feedbackRevision.revision.id,
+    scope: 'retrieval',
+    signal: 'relevant',
+    actorType: 'agent',
+  });
+  const beforeRetrievalFeedback = await call(client, 'memory_search', {
+    query: 'revision-aware-feedback-probe',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    revisionId: feedbackRevision.revision.id,
+    scope: 'retrieval',
+    signal: 'relevant',
+    actorType: 'agent',
+    query: 'revision-aware-feedback-probe',
+  });
+  const afterRetrievalFeedback = await call(client, 'memory_search', {
+    query: 'revision-aware-feedback-probe',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+  });
+  assert(
+    JSON.stringify(beforeRetrievalFeedback.results.map((item) => [item.id, item.relevanceScore])) ===
+      JSON.stringify(afterRetrievalFeedback.results.map((item) => [item.id, item.relevanceScore])),
+    'retrieval feedback must not change ranking',
+  );
+  await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    revisionId: feedbackRevision.revision.id,
+    scope: 'content',
+    signal: 'verified',
+    actorType: 'external',
+  });
+  const verifiedFixture = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
+  assert(verifiedFixture.feedbackSummary.feedbackStatus === 'verified', 'verified status');
+  await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    revisionId: feedbackRevision.revision.id,
+    scope: 'content',
+    signal: 'correct',
+    actorType: 'agent',
+  });
+  const supportedFixture = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
+  assert(supportedFixture.feedbackSummary.feedbackStatus === 'supported', 'latest correct status');
+  await call(client, 'memory_feedback', {
+    memoryId: feedbackFixture.id,
+    revisionId: feedbackRevision.revision.id,
+    scope: 'content',
+    signal: 'stale',
+    actorType: 'agent',
+  });
+  const staleFixture = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
+  assert(staleFixture.feedbackSummary.feedbackStatus === 'needs-review', 'latest stale status');
+  const compactFeedback = await call(client, 'memory_feedback_list', {
+    memoryId: feedbackFixture.id,
+    limit: 2,
+  });
+  assert(compactFeedback.nextCursor, 'feedback history should paginate');
+  assert(
+    compactFeedback.items.every((item) => item.note === undefined && item.metadata === undefined),
+    'feedback history should be compact by default',
+  );
+  const detailedFeedback = await call(client, 'memory_feedback_list', {
+    memoryId: feedbackFixture.id,
+    includeDetails: true,
+    limit: 100,
+  });
+  assert(
+    detailedFeedback.items.some((item) => item.note === 'The user corrected this revision.'),
+    'feedback details should be opt-in',
+  );
+  const secondConcern = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    title: 'Second feedback review fixture',
+    kind: 'feedback-probe',
+    content: { marker: 'second-feedback-review-fixture' },
+  });
+  await call(client, 'memory_feedback', {
+    memoryId: secondConcern.id,
+    scope: 'content',
+    signal: 'contradicted',
+    actorType: 'external',
+  });
+  const reviewPageOne = await call(client, 'memory_list', {
+    spaceId: 'live-probe',
+    feedbackStatus: 'needs-review',
+    limit: 1,
+  });
+  const reviewPageTwo = await call(client, 'memory_list', {
+    spaceId: 'live-probe',
+    feedbackStatus: 'needs-review',
+    limit: 1,
+    cursor: reviewPageOne.nextCursor,
+  });
+  assert(reviewPageOne.items.length === 1 && reviewPageOne.nextCursor, 'review page one');
+  assert(reviewPageTwo.items.length === 1, 'review filter must apply before pagination');
+  assert(
+    new Set([...reviewPageOne.items, ...reviewPageTwo.items].map((item) => item.id)).size === 2,
+    'review pagination should return distinct matching memories',
+  );
   const firstUnlink = await call(client, 'memory_unlink', { linkId: link.id });
   const secondUnlink = await call(client, 'memory_unlink', { linkId: link.id });
   assert(firstUnlink.deletedAt === secondUnlink.deletedAt, 'unlink must be idempotent');
@@ -672,7 +861,9 @@ async function run() {
   });
   await call(client, 'memory_feedback', {
     memoryId: disposable.id,
-    signal: 'test-only',
+    scope: 'content',
+    signal: 'stale',
+    actorType: 'system',
   });
   const inspectionDatabase = new Database(path.join(dataDir, 'memory.db'), { readonly: true });
   const disposableSegmentIds = inspectionDatabase

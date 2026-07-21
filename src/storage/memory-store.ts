@@ -7,8 +7,15 @@ import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import { contentHash, parseJsonValue, stableStringify } from '../domain/json.js';
 import type {
+  ContentFeedbackSignal,
+  FeedbackActorType,
+  FeedbackStatus,
   IndexStatus,
   JsonObject,
+  MemoryFeedback,
+  MemoryFeedbackInput,
+  MemoryFeedbackListFilters,
+  MemoryFeedbackListPage,
   MemoryInput,
   MemoryLink,
   MemoryLinkDirection,
@@ -21,6 +28,8 @@ import type {
   MemoryTraversalPathStep,
   SegmentRecord,
   SourceInput,
+  StoredFeedbackScope,
+  FeedbackSummary,
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
@@ -52,6 +61,20 @@ interface RevisionRelations {
   sourcesByRevisionId: Map<string, SourceInput[]>;
   tagsByRevisionId: Map<string, string[]>;
 }
+
+const contentFeedbackSignals = [
+  'verified',
+  'correct',
+  'incorrect',
+  'stale',
+  'contradicted',
+] as const;
+const retrievalFeedbackSignals = ['relevant', 'irrelevant', 'helpful', 'not_helpful'] as const;
+const contentFeedbackSignalSchema = z.enum(contentFeedbackSignals);
+const retrievalFeedbackSignalSchema = z.enum(retrievalFeedbackSignals);
+const feedbackScopeSchema = z.enum(['content', 'retrieval']);
+const feedbackActorTypeSchema = z.enum(['user', 'agent', 'system', 'external']);
+const storedFeedbackScopeSchema = z.enum(['legacy', 'content', 'retrieval']);
 
 const joinedMemoryColumns = `
   m.id AS memory_record_id,
@@ -90,6 +113,7 @@ function assertTemporalRange(validFrom: string | undefined, validTo: string | un
 }
 
 const listCursorSchema = z.object({ updatedAt: z.string(), id: z.string() });
+const feedbackCursorSchema = z.object({ createdAt: z.string(), id: z.string() });
 
 function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
   try {
@@ -101,6 +125,38 @@ function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
 
 function encodeListCursor(updatedAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ updatedAt, id }), 'utf8').toString('base64url');
+}
+
+function decodeFeedbackCursor(cursor: string): z.infer<typeof feedbackCursorSchema> {
+  try {
+    return feedbackCursorSchema.parse(
+      JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
+    );
+  } catch {
+    throw new Error('Invalid memory feedback cursor');
+  }
+}
+
+function encodeFeedbackCursor(createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, id }), 'utf8').toString('base64url');
+}
+
+function emptyFeedbackSummary(revisionId: string): FeedbackSummary {
+  return {
+    revisionId,
+    feedbackStatus: 'unreviewed',
+    latestSignal: null,
+    latestActorType: null,
+    latestAt: null,
+    contentEventCount: 0,
+    retrievalEventCount: 0,
+  };
+}
+
+function feedbackStatusForSignal(signal: ContentFeedbackSignal): FeedbackStatus {
+  if (signal === 'verified') return 'verified';
+  if (signal === 'correct') return 'supported';
+  return 'needs-review';
 }
 
 function canonicalRevisionPayload(
@@ -505,6 +561,78 @@ export class MemoryStore {
     return { sourcesByRevisionId, tagsByRevisionId };
   }
 
+  private feedbackFromRow(row: Row): MemoryFeedback {
+    const actorType = optionalString(row.actor_type);
+    return {
+      id: String(row.id),
+      memoryId: String(row.memory_id),
+      revisionId: optionalString(row.revision_id),
+      scope: storedFeedbackScopeSchema.parse(row.scope),
+      signal: String(row.signal),
+      actorType: actorType === null ? null : feedbackActorTypeSchema.parse(actorType),
+      actorId: optionalString(row.actor_id),
+      query: optionalString(row.query),
+      value: optionalNumber(row.value),
+      note: optionalString(row.note),
+      metadata: parseObject(row.metadata_json),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private loadFeedbackSummaries(
+    revisionIds: string[],
+    atTime?: string,
+  ): Map<string, FeedbackSummary> {
+    const uniqueIds = [...new Set(revisionIds)];
+    const summaries = new Map<string, FeedbackSummary>();
+    for (const revisionId of uniqueIds) summaries.set(revisionId, emptyFeedbackSummary(revisionId));
+    for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+      const batch = uniqueIds.slice(offset, offset + 500);
+      if (batch.length === 0) continue;
+      const placeholders = batch.map(() => '?').join(',');
+      const temporalClause = atTime ? 'AND created_at <= ?' : '';
+      const rows = this.allRows(
+        `WITH standardized AS (
+           SELECT revision_id, scope, signal, actor_type, created_at, id,
+                  COUNT(*) OVER (PARTITION BY revision_id, scope) AS event_count,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY revision_id, scope ORDER BY created_at DESC, id DESC
+                  ) AS event_rank
+             FROM memory_feedback
+            WHERE revision_id IN (${placeholders})
+              ${temporalClause}
+              AND (
+                (scope = 'content' AND signal IN ('verified', 'correct', 'incorrect', 'stale', 'contradicted'))
+                OR
+                (scope = 'retrieval' AND signal IN ('relevant', 'irrelevant', 'helpful', 'not_helpful'))
+              )
+         )
+         SELECT revision_id, scope, signal, actor_type, created_at, event_count
+           FROM standardized WHERE event_rank = 1`,
+        ...batch,
+        ...(atTime ? [atTime] : []),
+      );
+      for (const row of rows) {
+        const revisionId = String(row.revision_id);
+        const summary = summaries.get(revisionId) ?? emptyFeedbackSummary(revisionId);
+        if (row.scope === 'content') {
+          const signal = contentFeedbackSignalSchema.parse(row.signal);
+          const actorType = optionalString(row.actor_type);
+          summary.feedbackStatus = feedbackStatusForSignal(signal);
+          summary.latestSignal = signal;
+          summary.latestActorType =
+            actorType === null ? null : feedbackActorTypeSchema.parse(actorType);
+          summary.latestAt = String(row.created_at);
+          summary.contentEventCount = Number(row.event_count);
+        } else if (row.scope === 'retrieval') {
+          summary.retrievalEventCount = Number(row.event_count);
+        }
+        summaries.set(revisionId, summary);
+      }
+    }
+    return summaries;
+  }
+
   private revisionFromRow(row: Row, relations?: RevisionRelations): MemoryRevision {
     const revisionId = String(row.revision_id ?? row.id);
     const tags = relations
@@ -548,7 +676,9 @@ export class MemoryStore {
     memory: Row,
     revision: Row,
     state = z.enum(['active', 'archived', 'deleted']).parse(memory.state),
+    atTime?: string,
   ): MemoryRecord {
+    const revisionId = String(revision.revision_id ?? revision.id);
     return {
       id: String(memory.id),
       spaceId: String(memory.space_id),
@@ -560,12 +690,16 @@ export class MemoryStore {
         .enum(['pending', 'ready', 'lexical-only', 'failed'])
         .parse(memory.index_status),
       revision: this.revisionFromRow(revision),
+      feedbackSummary:
+        this.loadFeedbackSummaries([revisionId], atTime).get(revisionId) ??
+        emptyFeedbackSummary(revisionId),
     };
   }
 
   private memoryFromJoinedRow(
     row: Row,
     relations: RevisionRelations,
+    feedbackSummaries: Map<string, FeedbackSummary>,
     state?: MemoryState,
   ): MemoryRecord {
     const memory: Row = {
@@ -578,6 +712,7 @@ export class MemoryStore {
       index_status: row.memory_index_status,
     };
     const resolvedState = state ?? z.enum(['active', 'archived', 'deleted']).parse(memory.state);
+    const revisionId = String(row.revision_id);
     return {
       id: String(memory.id),
       spaceId: String(memory.space_id),
@@ -589,6 +724,7 @@ export class MemoryStore {
         .enum(['pending', 'ready', 'lexical-only', 'failed'])
         .parse(memory.index_status),
       revision: this.revisionFromRow(row, relations),
+      feedbackSummary: feedbackSummaries.get(revisionId) ?? emptyFeedbackSummary(revisionId),
     };
   }
 
@@ -632,7 +768,7 @@ export class MemoryStore {
       if (!stateRow) throw new Error('No memory state exists at the requested point in time');
       state = z.enum(['active', 'archived', 'deleted']).parse(stateRow.state);
     }
-    return this.memoryFromRows(memory, revision, state);
+    return this.memoryFromRows(memory, revision, state, options.atTime);
   }
 
   public getMemoriesByRevisionIds(
@@ -653,6 +789,10 @@ export class MemoryStore {
     );
     const relations = this.loadRevisionRelations(
       rows.map((row) => String(row.revision_id)),
+    );
+    const feedbackSummaries = this.loadFeedbackSummaries(
+      rows.map((row) => String(row.revision_id)),
+      atTime,
     );
     const statesByMemoryId = new Map<string, MemoryState>();
     if (atTime && rows.length > 0) {
@@ -682,7 +822,12 @@ export class MemoryStore {
       const memoryId = String(row.memory_record_id);
       const historicalState = atTime ? statesByMemoryId.get(memoryId) : undefined;
       if (atTime && !historicalState) continue;
-      const record = this.memoryFromJoinedRow(row, relations, historicalState);
+      const record = this.memoryFromJoinedRow(
+        row,
+        relations,
+        feedbackSummaries,
+        historicalState,
+      );
       records.set(record.revision.id, record);
     }
     return records;
@@ -711,6 +856,10 @@ export class MemoryStore {
     const relations = this.loadRevisionRelations(
       rows.map((row) => String(row.revision_id)),
     );
+    const feedbackSummaries = this.loadFeedbackSummaries(
+      rows.map((row) => String(row.revision_id)),
+      atTime,
+    );
     const statesByMemoryId = new Map<string, MemoryState>();
     for (const row of this.allRows(
       `SELECT event.memory_id, event.state
@@ -734,7 +883,10 @@ export class MemoryStore {
       const memoryId = String(row.memory_record_id);
       const state = statesByMemoryId.get(memoryId);
       if (!state) continue;
-      records.set(memoryId, this.memoryFromJoinedRow(row, relations, state));
+      records.set(
+        memoryId,
+        this.memoryFromJoinedRow(row, relations, feedbackSummaries, state),
+      );
     }
     return records;
   }
@@ -780,6 +932,22 @@ export class MemoryStore {
       );
       parameters.push(tag);
     }
+    if (filters.feedbackStatus) {
+      const latestContentSignal = `(SELECT feedback.signal FROM memory_feedback feedback
+        WHERE feedback.revision_id = r.id
+          AND feedback.scope = 'content'
+          AND feedback.signal IN ('verified', 'correct', 'incorrect', 'stale', 'contradicted')
+        ORDER BY feedback.created_at DESC, feedback.id DESC LIMIT 1)`;
+      if (filters.feedbackStatus === 'unreviewed') {
+        clauses.push(`${latestContentSignal} IS NULL`);
+      } else if (filters.feedbackStatus === 'verified') {
+        clauses.push(`${latestContentSignal} = 'verified'`);
+      } else if (filters.feedbackStatus === 'supported') {
+        clauses.push(`${latestContentSignal} = 'correct'`);
+      } else {
+        clauses.push(`${latestContentSignal} IN ('incorrect', 'stale', 'contradicted')`);
+      }
+    }
     const limit = Math.min(filters.limit ?? 50, 200);
     parameters.push(limit + 1);
     const rows = this.allRows(
@@ -794,7 +962,12 @@ export class MemoryStore {
     const relations = this.loadRevisionRelations(
       pageRows.map((row) => String(row.revision_id)),
     );
-    const items = pageRows.map((row) => this.memoryFromJoinedRow(row, relations));
+    const feedbackSummaries = this.loadFeedbackSummaries(
+      pageRows.map((row) => String(row.revision_id)),
+    );
+    const items = pageRows.map((row) =>
+      this.memoryFromJoinedRow(row, relations, feedbackSummaries),
+    );
     const last = pageRows.at(-1);
     return {
       items,
@@ -1403,38 +1576,153 @@ export class MemoryStore {
     };
   }
 
-  public recordFeedback(input: {
-    memoryId: string;
-    signal: string;
-    value?: number;
-    note?: string;
-    metadata?: JsonObject;
-  }): Row {
-    this.getMemory(input.memoryId);
-    const result = {
-      id: randomUUID(),
-      memoryId: input.memoryId,
-      signal: input.signal,
-      value: input.value ?? null,
-      note: input.note ?? null,
-      metadata: input.metadata ?? {},
-      createdAt: now(),
-    };
-    this.database
-      .prepare(
-        `INSERT INTO memory_feedback(id, memory_id, signal, value, note, metadata_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        result.id,
-        result.memoryId,
-        result.signal,
-        result.value,
-        result.note,
-        stableStringify(result.metadata),
-        result.createdAt,
+  public recordFeedback(input: MemoryFeedbackInput): MemoryFeedback {
+    const scope = feedbackScopeSchema.parse(input.scope);
+    const actorType = feedbackActorTypeSchema.parse(input.actorType);
+    if (scope === 'content') {
+      contentFeedbackSignalSchema.parse(input.signal);
+      if (input.query !== undefined) throw new Error('Content feedback must not include query');
+    } else {
+      retrievalFeedbackSignalSchema.parse(input.signal);
+      if (!input.revisionId) throw new Error('Retrieval feedback requires revisionId');
+      if (!input.query?.trim()) throw new Error('Retrieval feedback requires query');
+    }
+    if (input.actorId !== undefined && !input.actorId.trim()) {
+      throw new Error('actorId must contain non-whitespace text');
+    }
+    if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) {
+      throw new Error('idempotencyKey must contain non-whitespace text');
+    }
+    const actorId = input.actorId?.trim() || null;
+    const query = scope === 'retrieval' ? (input.query?.trim() ?? null) : null;
+    const note = input.note?.trim() || null;
+    const metadata = input.metadata ?? {};
+    const idempotencyKey = input.idempotencyKey?.trim() || null;
+
+    const transaction = this.database.transaction((): MemoryFeedback => {
+      const existing = idempotencyKey
+        ? this.getRow(
+            'SELECT * FROM memory_feedback WHERE memory_id = ? AND idempotency_key = ?',
+            input.memoryId,
+            idempotencyKey,
+          )
+        : undefined;
+      const memory = this.getRow('SELECT current_revision_id FROM memories WHERE id = ?', input.memoryId);
+      if (!memory) throw new Error(`Memory not found: ${input.memoryId}`);
+      const existingRevisionId = existing ? optionalString(existing.revision_id) : null;
+      const revisionId =
+        input.revisionId ?? existingRevisionId ?? String(memory.current_revision_id);
+      if (
+        !this.getRow(
+          'SELECT 1 FROM memory_revisions WHERE id = ? AND memory_id = ?',
+          revisionId,
+          input.memoryId,
+        )
+      ) {
+        throw new Error(`Revision ${revisionId} does not belong to memory ${input.memoryId}`);
+      }
+      const canonicalRequest = {
+        actorId,
+        actorType,
+        memoryId: input.memoryId,
+        metadata,
+        note,
+        query,
+        revisionId,
+        scope,
+        signal: input.signal,
+      };
+      const requestHash = createHash('sha256')
+        .update(stableStringify(canonicalRequest), 'utf8')
+        .digest('hex');
+      if (existing) {
+        if (optionalString(existing.request_hash) !== requestHash) {
+          throw new Error(`Feedback idempotency conflict for key: ${idempotencyKey}`);
+        }
+        return this.feedbackFromRow(existing);
+      }
+
+      const id = randomUUID();
+      const createdAt = now();
+      this.database
+        .prepare(
+          `INSERT INTO memory_feedback(
+             id, memory_id, revision_id, scope, signal, value, actor_type, actor_id, query,
+             note, metadata_json, idempotency_key, request_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.memoryId,
+          revisionId,
+          scope,
+          input.signal,
+          actorType,
+          actorId,
+          query,
+          note,
+          stableStringify(metadata),
+          idempotencyKey,
+          requestHash,
+          createdAt,
+        );
+      return this.feedbackFromRow(
+        this.requireRow('SELECT * FROM memory_feedback WHERE id = ?', id),
       );
-    return result;
+    });
+    return transaction.immediate();
+  }
+
+  public listFeedback(filters: MemoryFeedbackListFilters): MemoryFeedbackListPage {
+    if (!this.getRow('SELECT 1 FROM memories WHERE id = ?', filters.memoryId)) {
+      throw new Error(`Memory not found: ${filters.memoryId}`);
+    }
+    if (
+      filters.revisionId &&
+      !this.getRow(
+        'SELECT 1 FROM memory_revisions WHERE id = ? AND memory_id = ?',
+        filters.revisionId,
+        filters.memoryId,
+      )
+    ) {
+      throw new Error(`Revision ${filters.revisionId} does not belong to memory ${filters.memoryId}`);
+    }
+    const clauses = ['memory_id = ?'];
+    const parameters: unknown[] = [filters.memoryId];
+    if (filters.revisionId) {
+      clauses.push('revision_id = ?');
+      parameters.push(filters.revisionId);
+    }
+    if (filters.scope) {
+      clauses.push('scope = ?');
+      parameters.push(filters.scope);
+    }
+    if (filters.atTime) {
+      clauses.push('created_at <= ?');
+      parameters.push(filters.atTime);
+    }
+    if (filters.cursor) {
+      const cursor = decodeFeedbackCursor(filters.cursor);
+      clauses.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      parameters.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    const limit = Math.min(filters.limit ?? 20, 100);
+    parameters.push(limit + 1);
+    const rows = this.allRows(
+      `SELECT * FROM memory_feedback WHERE ${clauses.join(' AND ')}
+       ORDER BY created_at DESC, id DESC LIMIT ?`,
+      ...parameters,
+    );
+    const hasMore = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const last = pageRows.at(-1);
+    return {
+      items: pageRows.map((row) => this.feedbackFromRow(row)),
+      nextCursor:
+        hasMore && last
+          ? encodeFeedbackCursor(String(last.created_at), String(last.id))
+          : null,
+    };
   }
 
   public status(): Row {
@@ -1513,15 +1801,7 @@ export class MemoryStore {
       this.linkFromRow(row),
     );
     const feedback = this.allRows('SELECT * FROM memory_feedback ORDER BY created_at, id').map(
-      (row) => ({
-        id: String(row.id),
-        memoryId: String(row.memory_id),
-        signal: String(row.signal),
-        value: optionalNumber(row.value),
-        note: optionalString(row.note),
-        metadata: parseObject(row.metadata_json),
-        createdAt: String(row.created_at),
-      }),
+      (row) => this.feedbackFromRow(row),
     );
     const stateEvents = this.allRows(
       'SELECT * FROM memory_state_events ORDER BY recorded_at, memory_id, event_number',

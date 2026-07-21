@@ -14,7 +14,7 @@ Simple Memory can help an agent remember:
 - Plans, preferences, notes, and long-running personal projects
 - Relationships and dependencies between stored information
 
-Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, and relationships. Ordinary recall uses active, current, presently valid information. An optional review date can warn an agent that information may need confirmation without hiding or changing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
+Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, relationships, and revision-specific feedback. Ordinary recall uses active, current, presently valid information. Review dates and feedback warnings can tell an agent that information may need confirmation without silently changing or suppressing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
 
 ## Models
 
@@ -160,7 +160,8 @@ Standard Hugging Face variables such as `HF_HOME` can also be used to relocate t
 | `memory_link` | Idempotently create a relationship between memories. |
 | `memory_unlink` | Remove a relationship. |
 | `memory_traverse` | Explore connected memories with paths, filters, ranking, and pagination. |
-| `memory_feedback` | Record usefulness, correctness, verification, or staleness feedback. |
+| `memory_feedback` | Record standardized content or query-specific retrieval feedback for a revision. |
+| `memory_feedback_list` | Read compact or detailed feedback history. |
 | `memory_status` | Inspect storage, indexing, and model health. |
 
 Agents can also read complete memories and revision histories through MCP resources.

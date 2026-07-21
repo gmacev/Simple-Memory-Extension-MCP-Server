@@ -295,6 +295,12 @@ export class MemoryService {
     return this.store.recordFeedback(input);
   }
 
+  public listFeedback(
+    filters: Parameters<MemoryStore['listFeedback']>[0],
+  ): ReturnType<MemoryStore['listFeedback']> {
+    return this.store.listFeedback(filters);
+  }
+
   public async status(probeModels = false): Promise<Record<string, unknown>> {
     let modelHealth: Awaited<ReturnType<ModelClient['health']>> | undefined;
     let modelError: string | undefined;

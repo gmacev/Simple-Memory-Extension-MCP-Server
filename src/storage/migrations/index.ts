@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 import type { Logger } from '../../logger.js';
 import { schemaSql } from '../schema.js';
 import { linkTraversalIndexesSql } from './002-link-traversal-indexes.js';
+import { revisionAwareFeedbackSql } from './003-revision-aware-feedback.js';
 
 interface Migration {
   version: number;
@@ -27,6 +28,7 @@ const migrationRowSchema = z.object({
 const migrations = [
   { version: 1, name: 'initial-schema', sql: schemaSql },
   { version: 2, name: 'link-traversal-indexes', sql: linkTraversalIndexesSql },
+  { version: 3, name: 'revision-aware-feedback', sql: revisionAwareFeedbackSql },
 ] satisfies readonly Migration[];
 
 export const currentSchemaVersion = migrations.at(-1)?.version ?? 0;

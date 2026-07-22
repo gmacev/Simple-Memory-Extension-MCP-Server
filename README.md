@@ -16,6 +16,8 @@ Simple Memory can help an agent remember:
 
 Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, relationships, and revision-specific feedback. Ordinary recall uses active, current, presently valid information. Review dates and feedback warnings can tell an agent that information may need confirmation without silently changing or suppressing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
 
+Multiple agents can safely share a space. An optional `logicalKey` gives one evolving memory a stable identity, revision checks prevent silent overwrites, and confirmed duplicates can be merged into a canonical memory without deleting their history. Similarity search only suggests possible duplicates; it never merges information automatically.
+
 ## Models
 
 Simple Memory uses two local models:
@@ -150,7 +152,9 @@ Standard Hugging Face variables such as `HF_HOME` can also be used to relocate t
 | `space_list` | List memory spaces. |
 | `memory_create` | Store a new memory. |
 | `memory_revise` | Add a new immutable revision. |
+| `memory_merge` | Redirect confirmed duplicates to one canonical memory while preserving them. |
 | `memory_get` | Read a current or historical memory. |
+| `memory_get_by_key` | Resolve an exact logical key to its canonical memory. |
 | `memory_history` | Read revision history. |
 | `memory_list` | List active memory summaries by default, with filters and pagination. |
 | `memory_search` | Search by exact text, meaning, metadata, provenance, state, or time. |

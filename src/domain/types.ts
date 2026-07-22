@@ -43,6 +43,10 @@ export interface MemoryInput {
   idempotencyKey?: string;
 }
 
+export interface MemoryCreateInput extends MemoryInput {
+  logicalKey?: string;
+}
+
 export interface MemoryRevision {
   id: string;
   memoryId: string;
@@ -70,6 +74,9 @@ export interface MemoryRevision {
 export interface MemoryRecord {
   id: string;
   spaceId: string;
+  logicalKey: string | null;
+  canonicalMemoryId: string | null;
+  mergedMemoryCount: number;
   state: MemoryState;
   createdAt: string;
   updatedAt: string;
@@ -77,6 +84,36 @@ export interface MemoryRecord {
   indexStatus: IndexStatus;
   revision: MemoryRevision;
   feedbackSummary: FeedbackSummary;
+}
+
+export interface LogicalMemoryResolution {
+  logicalKey: string;
+  matchedMemoryId: string;
+  redirected: boolean;
+  memory: MemoryRecord;
+}
+
+export interface MemoryMergeInput {
+  canonicalMemoryId: string;
+  expectedCanonicalRevisionId: string;
+  duplicates: Array<{
+    memoryId: string;
+    expectedRevisionId: string;
+  }>;
+  actorId?: string;
+  reason?: string;
+  metadata?: JsonObject;
+  idempotencyKey?: string;
+}
+
+export interface MemoryMergeResult {
+  operationId: string;
+  canonicalMemory: MemoryRecord;
+  mergedMemoryIds: string[];
+  redirectedMemoryIds: string[];
+  actorId: string | null;
+  reason: string | null;
+  createdAt: string;
 }
 
 export interface FeedbackSummary {

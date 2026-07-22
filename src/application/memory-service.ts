@@ -3,6 +3,7 @@ import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type {
   JsonObject,
+  MemoryCreateInput,
   MemoryInput,
   MemoryLinkDirection,
   MemoryListFilters,
@@ -102,7 +103,7 @@ export class MemoryService {
   }
 
   public async createMemory(
-    input: MemoryInput,
+    input: MemoryCreateInput,
     actor: string | null = null,
   ): Promise<MemoryRecord> {
     const created = this.store.createMemory(input, actor);
@@ -144,6 +145,14 @@ export class MemoryService {
     return this.store.getMemory(memoryId, options);
   }
 
+  public getMemoryByLogicalKey(
+    spaceId: string,
+    logicalKey: string,
+    atTime?: string,
+  ): ReturnType<MemoryStore['getMemoryByLogicalKey']> {
+    return this.store.getMemoryByLogicalKey(spaceId, logicalKey, atTime);
+  }
+
   public getHistory(memoryId: string): ReturnType<MemoryStore['getHistory']> {
     return this.store.getHistory(memoryId);
   }
@@ -162,6 +171,12 @@ export class MemoryService {
 
   public deleteMemory(memoryId: string): boolean {
     return this.store.deleteMemory(memoryId);
+  }
+
+  public mergeMemories(
+    input: Parameters<MemoryStore['mergeMemories']>[0],
+  ): ReturnType<MemoryStore['mergeMemories']> {
+    return this.store.mergeMemories(input);
   }
 
   public createLink(

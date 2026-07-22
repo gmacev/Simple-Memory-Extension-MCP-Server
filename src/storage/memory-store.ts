@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
+import { MemoryIdentityConflictError } from '../domain/errors.js';
 import { contentHash, parseJsonValue, stableStringify } from '../domain/json.js';
 import type {
   ContentFeedbackSignal,
@@ -16,11 +17,15 @@ import type {
   MemoryFeedbackInput,
   MemoryFeedbackListFilters,
   MemoryFeedbackListPage,
+  MemoryCreateInput,
   MemoryInput,
   MemoryLink,
   MemoryLinkDirection,
   MemoryListFilters,
   MemoryListPage,
+  LogicalMemoryResolution,
+  MemoryMergeInput,
+  MemoryMergeResult,
   MemoryRecord,
   MemoryRevision,
   MemoryState,
@@ -62,6 +67,12 @@ interface RevisionRelations {
   tagsByRevisionId: Map<string, string[]>;
 }
 
+interface MemoryIdentityInfo {
+  logicalKey: string | null;
+  canonicalMemoryId: string | null;
+  mergedMemoryCount: number;
+}
+
 const contentFeedbackSignals = [
   'verified',
   'correct',
@@ -79,6 +90,7 @@ const storedFeedbackScopeSchema = z.enum(['legacy', 'content', 'retrieval']);
 const joinedMemoryColumns = `
   m.id AS memory_record_id,
   m.space_id AS memory_space_id,
+  m.logical_key AS memory_logical_key,
   m.state AS memory_state,
   m.created_at AS memory_created_at,
   m.updated_at AS memory_updated_at,
@@ -125,6 +137,11 @@ function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
 
 function encodeListCursor(updatedAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ updatedAt, id }), 'utf8').toString('base64url');
+}
+
+function normalizeLogicalKey(logicalKey: string | undefined): string | null {
+  const normalized = logicalKey?.normalize('NFKC').trim();
+  return normalized ? normalized : null;
 }
 
 function decodeFeedbackCursor(cursor: string): z.infer<typeof feedbackCursorSchema> {
@@ -333,18 +350,11 @@ export class MemoryStore {
     return id;
   }
 
-  public createMemory(input: MemoryInput, actor: string | null = null): MemoryRecord {
+  public createMemory(input: MemoryCreateInput, actor: string | null = null): MemoryRecord {
     const spaceId = input.spaceId ?? 'default';
     this.assertSpace(spaceId);
     assertTemporalRange(input.validFrom, input.validTo);
-    if (input.idempotencyKey) {
-      const existing = this.getRow(
-        'SELECT id FROM memories WHERE space_id = ? AND idempotency_key = ?',
-        spaceId,
-        input.idempotencyKey,
-      );
-      if (existing && typeof existing.id === 'string') return this.getMemory(existing.id);
-    }
+    const logicalKey = normalizeLogicalKey(input.logicalKey);
     const memoryId = randomUUID();
     const revisionId = randomUUID();
     const timestamp = now();
@@ -358,15 +368,39 @@ export class MemoryStore {
       metadata,
       sources: input.sources ?? [],
     });
-    const transaction = this.database.transaction(() => {
+    const transaction = this.database.transaction((): string => {
+      if (input.idempotencyKey) {
+        const existing = this.getRow(
+          'SELECT id FROM memories WHERE space_id = ? AND idempotency_key = ?',
+          spaceId,
+          input.idempotencyKey,
+        );
+        if (existing) return String(existing.id);
+      }
+      if (logicalKey) {
+        const existing = this.getRow(
+          'SELECT * FROM memories WHERE space_id = ? AND logical_key = ?',
+          spaceId,
+          logicalKey,
+        );
+        if (existing) throw this.identityConflict(existing, logicalKey);
+      }
       this.database
         .prepare(
           `INSERT INTO memories(
             id, space_id, state, current_revision_id, created_at, updated_at, index_status,
-            idempotency_key
-          ) VALUES (?, ?, 'active', ?, ?, ?, 'pending', ?)`,
+            idempotency_key, logical_key
+          ) VALUES (?, ?, 'active', ?, ?, ?, 'pending', ?, ?)`,
         )
-        .run(memoryId, spaceId, revisionId, timestamp, timestamp, input.idempotencyKey ?? null);
+        .run(
+          memoryId,
+          spaceId,
+          revisionId,
+          timestamp,
+          timestamp,
+          input.idempotencyKey ?? null,
+          logicalKey,
+        );
       this.database
         .prepare(
           `INSERT INTO memory_state_events(id, memory_id, event_number, state, recorded_at)
@@ -386,9 +420,9 @@ export class MemoryStore {
         searchableText,
       });
       this.createIndexJob(revisionId, timestamp);
+      return memoryId;
     });
-    transaction();
-    return this.getMemory(memoryId);
+    return this.getMemory(transaction.immediate());
   }
 
   public reviseMemory(
@@ -398,6 +432,11 @@ export class MemoryStore {
     actor: string | null = null,
   ): MemoryRecord {
     const current = this.getMemory(memoryId);
+    if (current.canonicalMemoryId) {
+      throw new Error(
+        `Merged memories cannot be revised; revise canonical memory ${current.canonicalMemoryId}`,
+      );
+    }
     if (current.state === 'deleted') throw new Error('Deleted memories cannot be revised');
     if (input.spaceId && input.spaceId !== current.spaceId) {
       throw new Error('A memory revision cannot move between spaces');
@@ -424,10 +463,22 @@ export class MemoryStore {
       const changed = this.database
         .prepare(
           `UPDATE memories SET current_revision_id = ?, updated_at = ?, index_status = 'pending'
-           WHERE id = ? AND current_revision_id = ?`,
+           WHERE id = ? AND current_revision_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM memory_redirect_events redirect
+               WHERE redirect.source_memory_id = memories.id
+             )`,
         )
         .run(revisionId, timestamp, memoryId, expectedRevisionId);
-      if (changed.changes !== 1) throw new Error('Revision conflict during update');
+      if (changed.changes !== 1) {
+        const canonicalMemoryId = this.redirectTarget(memoryId);
+        if (canonicalMemoryId) {
+          throw new Error(
+            `Merged memories cannot be revised; revise canonical memory ${canonicalMemoryId}`,
+          );
+        }
+        throw new Error('Revision conflict during update');
+      }
       this.insertRevision({
         id: revisionId,
         memoryId,
@@ -526,6 +577,43 @@ export class MemoryStore {
     if (typeof row.type === 'string') result.type = row.type;
     if (typeof row.observed_at === 'string') result.observedAt = row.observed_at;
     return result;
+  }
+
+  private redirectTarget(memoryId: string, atTime?: string): string | null {
+    const row = this.getRow(
+      `SELECT canonical_memory_id FROM memory_redirect_events
+       WHERE source_memory_id = ? ${atTime ? 'AND created_at <= ?' : ''}
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      memoryId,
+      ...(atTime ? [atTime] : []),
+    );
+    return row ? String(row.canonical_memory_id) : null;
+  }
+
+  private resolveCanonicalMemoryId(memoryId: string, atTime?: string): string {
+    const visited = new Set<string>();
+    let current = memoryId;
+    while (true) {
+      if (visited.has(current)) throw new Error('Memory redirect cycle detected');
+      visited.add(current);
+      const target = this.redirectTarget(current, atTime);
+      if (!target) return current;
+      current = target;
+    }
+  }
+
+  private identityConflict(memory: Row, logicalKey: string): MemoryIdentityConflictError {
+    const matchedMemoryId = String(memory.id);
+    const canonicalMemoryId = this.resolveCanonicalMemoryId(matchedMemoryId);
+    const canonical = this.requireRow('SELECT * FROM memories WHERE id = ?', canonicalMemoryId);
+    return new MemoryIdentityConflictError({
+      spaceId: String(memory.space_id),
+      logicalKey,
+      matchedMemoryId,
+      canonicalMemoryId,
+      currentRevisionId: String(canonical.current_revision_id),
+      state: z.enum(['active', 'archived', 'deleted']).parse(canonical.state),
+    });
   }
 
   private loadRevisionRelations(revisionIds: string[]): RevisionRelations {
@@ -672,6 +760,59 @@ export class MemoryStore {
     };
   }
 
+  private loadIdentityInfo(memories: Row[], atTime?: string): Map<string, MemoryIdentityInfo> {
+    const memoryIds = memories.map((memory) =>
+      String(memory.memory_record_id ?? memory.id),
+    );
+    const identities = new Map<string, MemoryIdentityInfo>();
+    for (const memory of memories) {
+      const memoryId = String(memory.memory_record_id ?? memory.id);
+      identities.set(memoryId, {
+        logicalKey: optionalString(memory.memory_logical_key ?? memory.logical_key),
+        canonicalMemoryId: null,
+        mergedMemoryCount: 0,
+      });
+    }
+    if (memoryIds.length === 0) return identities;
+
+    const placeholders = memoryIds.map(() => '?').join(',');
+    const temporalClause = atTime ? 'AND redirect.created_at <= ?' : '';
+    const newerTemporalClause = atTime ? 'AND newer.created_at <= ?' : '';
+    const latestClause = `NOT EXISTS (
+      SELECT 1 FROM memory_redirect_events newer
+      WHERE newer.source_memory_id = redirect.source_memory_id
+        ${newerTemporalClause}
+        AND (
+          newer.created_at > redirect.created_at
+          OR (newer.created_at = redirect.created_at AND newer.id > redirect.id)
+        )
+    )`;
+    const parametersForTime = atTime ? [atTime, atTime] : [];
+    const rows = this.allRows(
+      `SELECT redirect.source_memory_id, redirect.canonical_memory_id
+       FROM memory_redirect_events redirect
+       WHERE (
+         redirect.source_memory_id IN (${placeholders})
+         OR redirect.canonical_memory_id IN (${placeholders})
+       )
+       ${temporalClause}
+       AND ${latestClause}
+       ORDER BY redirect.created_at, redirect.id`,
+      ...memoryIds,
+      ...memoryIds,
+      ...parametersForTime,
+    );
+    for (const row of rows) {
+      const sourceMemoryId = String(row.source_memory_id);
+      const canonicalMemoryId = String(row.canonical_memory_id);
+      const source = identities.get(sourceMemoryId);
+      if (source) source.canonicalMemoryId = canonicalMemoryId;
+      const canonical = identities.get(canonicalMemoryId);
+      if (canonical) canonical.mergedMemoryCount += 1;
+    }
+    return identities;
+  }
+
   private memoryFromRows(
     memory: Row,
     revision: Row,
@@ -679,9 +820,13 @@ export class MemoryStore {
     atTime?: string,
   ): MemoryRecord {
     const revisionId = String(revision.revision_id ?? revision.id);
+    const identity = this.loadIdentityInfo([memory], atTime).get(String(memory.id));
     return {
       id: String(memory.id),
       spaceId: String(memory.space_id),
+      logicalKey: identity?.logicalKey ?? null,
+      canonicalMemoryId: identity?.canonicalMemoryId ?? null,
+      mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
       state,
       createdAt: String(memory.created_at),
       updatedAt: String(memory.updated_at),
@@ -700,11 +845,13 @@ export class MemoryStore {
     row: Row,
     relations: RevisionRelations,
     feedbackSummaries: Map<string, FeedbackSummary>,
+    identities: Map<string, MemoryIdentityInfo>,
     state?: MemoryState,
   ): MemoryRecord {
     const memory: Row = {
       id: row.memory_record_id,
       space_id: row.memory_space_id,
+      logical_key: row.memory_logical_key,
       state: row.memory_state,
       created_at: row.memory_created_at,
       updated_at: row.memory_updated_at,
@@ -713,9 +860,13 @@ export class MemoryStore {
     };
     const resolvedState = state ?? z.enum(['active', 'archived', 'deleted']).parse(memory.state);
     const revisionId = String(row.revision_id);
+    const identity = identities.get(String(memory.id));
     return {
       id: String(memory.id),
       spaceId: String(memory.space_id),
+      logicalKey: identity?.logicalKey ?? null,
+      canonicalMemoryId: identity?.canonicalMemoryId ?? null,
+      mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
       state: resolvedState,
       createdAt: String(memory.created_at),
       updatedAt: String(memory.updated_at),
@@ -771,6 +922,31 @@ export class MemoryStore {
     return this.memoryFromRows(memory, revision, state, options.atTime);
   }
 
+  public getMemoryByLogicalKey(
+    spaceId: string,
+    logicalKeyInput: string,
+    atTime?: string,
+  ): LogicalMemoryResolution {
+    const logicalKey = normalizeLogicalKey(logicalKeyInput);
+    if (!logicalKey) throw new Error('logicalKey must contain non-whitespace text');
+    const matched = this.getRow(
+      'SELECT * FROM memories WHERE space_id = ? AND logical_key = ?',
+      spaceId,
+      logicalKey,
+    );
+    if (!matched) {
+      throw new Error(`Logical memory not found in space ${spaceId}: ${logicalKey}`);
+    }
+    const matchedMemoryId = String(matched.id);
+    const canonicalMemoryId = this.resolveCanonicalMemoryId(matchedMemoryId, atTime);
+    return {
+      logicalKey,
+      matchedMemoryId,
+      redirected: matchedMemoryId !== canonicalMemoryId,
+      memory: this.getMemory(canonicalMemoryId, atTime ? { atTime } : {}),
+    };
+  }
+
   public getMemoriesByRevisionIds(
     revisionIds: string[],
     atTime?: string,
@@ -794,6 +970,7 @@ export class MemoryStore {
       rows.map((row) => String(row.revision_id)),
       atTime,
     );
+    const identities = this.loadIdentityInfo(rows, atTime);
     const statesByMemoryId = new Map<string, MemoryState>();
     if (atTime && rows.length > 0) {
       const memoryIds = [...new Set(rows.map((row) => String(row.memory_record_id)))];
@@ -826,6 +1003,7 @@ export class MemoryStore {
         row,
         relations,
         feedbackSummaries,
+        identities,
         historicalState,
       );
       records.set(record.revision.id, record);
@@ -860,6 +1038,7 @@ export class MemoryStore {
       rows.map((row) => String(row.revision_id)),
       atTime,
     );
+    const identities = this.loadIdentityInfo(rows, atTime);
     const statesByMemoryId = new Map<string, MemoryState>();
     for (const row of this.allRows(
       `SELECT event.memory_id, event.state
@@ -885,7 +1064,7 @@ export class MemoryStore {
       if (!state) continue;
       records.set(
         memoryId,
-        this.memoryFromJoinedRow(row, relations, feedbackSummaries, state),
+        this.memoryFromJoinedRow(row, relations, feedbackSummaries, identities, state),
       );
     }
     return records;
@@ -965,8 +1144,9 @@ export class MemoryStore {
     const feedbackSummaries = this.loadFeedbackSummaries(
       pageRows.map((row) => String(row.revision_id)),
     );
+    const identities = this.loadIdentityInfo(pageRows);
     const items = pageRows.map((row) =>
-      this.memoryFromJoinedRow(row, relations, feedbackSummaries),
+      this.memoryFromJoinedRow(row, relations, feedbackSummaries, identities),
     );
     const last = pageRows.at(-1);
     return {
@@ -980,6 +1160,11 @@ export class MemoryStore {
 
   public setState(memoryId: string, state: MemoryState): MemoryRecord {
     const current = this.getMemory(memoryId);
+    if (state === 'active' && current.canonicalMemoryId) {
+      throw new Error(
+        `Merged memories cannot be restored; use canonical memory ${current.canonicalMemoryId}`,
+      );
+    }
     if (current.state === 'deleted' && state !== 'deleted') {
       throw new Error('Deleted memories cannot be restored or archived');
     }
@@ -992,10 +1177,28 @@ export class MemoryStore {
     const previousTimestamp = Date.parse(String(latestEvent.recorded_at));
     const timestamp = new Date(Math.max(Date.now(), previousTimestamp + 1)).toISOString();
     const transaction = this.database.transaction(() => {
+      const redirectGuard =
+        state === 'active'
+          ? `AND NOT EXISTS (
+               SELECT 1 FROM memory_redirect_events redirect
+               WHERE redirect.source_memory_id = memories.id
+             )`
+          : '';
       const result = this.database
-        .prepare('UPDATE memories SET state = ?, updated_at = ? WHERE id = ? AND state = ?')
+        .prepare(
+          `UPDATE memories SET state = ?, updated_at = ?
+           WHERE id = ? AND state = ? ${redirectGuard}`,
+        )
         .run(state, timestamp, memoryId, current.state);
-      if (result.changes !== 1) throw new Error('Memory state changed concurrently');
+      if (result.changes !== 1) {
+        const canonicalMemoryId = state === 'active' ? this.redirectTarget(memoryId) : null;
+        if (canonicalMemoryId) {
+          throw new Error(
+            `Merged memories cannot be restored; use canonical memory ${canonicalMemoryId}`,
+          );
+        }
+        throw new Error('Memory state changed concurrently');
+      }
       this.database
         .prepare(
           `INSERT INTO memory_state_events(id, memory_id, event_number, state, recorded_at)
@@ -1233,9 +1436,10 @@ export class MemoryStore {
     const rows = this.allRows(
       `SELECT s.id AS segment_id, s.memory_id, s.revision_id, s.text, s.path,
               CASE
-                WHEN m.id = ? THEN 0
-                WHEN lower(r.title) = lower(?) THEN 1
-                ELSE 2
+                WHEN m.logical_key = ? THEN 0
+                WHEN m.id = ? THEN 1
+                WHEN lower(r.title) = lower(?) THEN 2
+                ELSE 3
               END AS rank_value
        FROM memories m
        JOIN memory_revisions r ON r.memory_id = m.id
@@ -1243,16 +1447,18 @@ export class MemoryStore {
          AND s.ordinal = (
            SELECT MIN(s2.ordinal) FROM memory_segments s2 WHERE s2.revision_id = r.id
          )
-       WHERE ${candidates.sql}
+         WHERE ${candidates.sql}
          AND (
-           m.id = ? OR lower(r.title) = lower(?)
+           m.logical_key = ? OR m.id = ? OR lower(r.title) = lower(?)
            OR lower(r.title) LIKE lower(?) ESCAPE '\\'
          )
        ORDER BY rank_value, r.recorded_at DESC
        LIMIT ?`,
       normalized,
       normalized,
+      normalized,
       ...candidates.parameters,
+      normalized,
       normalized,
       normalized,
       `%${escaped}%`,
@@ -1341,6 +1547,225 @@ export class MemoryStore {
       .slice(0, limit);
   }
 
+  private mergeResult(operationId: string): MemoryMergeResult {
+    const operation = this.requireRow(
+      'SELECT * FROM memory_merge_operations WHERE id = ?',
+      operationId,
+    );
+    const mergedMemoryIds = this.allRows(
+      `SELECT duplicate_memory_id FROM memory_merge_members
+       WHERE operation_id = ? ORDER BY duplicate_memory_id`,
+      operationId,
+    ).map((row) => String(row.duplicate_memory_id));
+    const redirectedMemoryIds = this.allRows(
+      `SELECT source_memory_id FROM memory_redirect_events
+       WHERE operation_id = ? ORDER BY source_memory_id`,
+      operationId,
+    ).map((row) => String(row.source_memory_id));
+    return {
+      operationId,
+      canonicalMemory: this.getMemory(String(operation.canonical_memory_id)),
+      mergedMemoryIds,
+      redirectedMemoryIds,
+      actorId: optionalString(operation.actor_id),
+      reason: optionalString(operation.reason),
+      createdAt: String(operation.created_at),
+    };
+  }
+
+  public mergeMemories(input: MemoryMergeInput): MemoryMergeResult {
+    if (input.duplicates.length === 0) throw new Error('At least one duplicate memory is required');
+    const actorId = input.actorId?.trim() || null;
+    const reason = input.reason?.trim() || null;
+    const idempotencyKey = input.idempotencyKey?.trim() || null;
+    const metadata = input.metadata ?? {};
+    const duplicateRevisions = new Map<string, string>();
+    for (const duplicate of input.duplicates) {
+      const existingRevision = duplicateRevisions.get(duplicate.memoryId);
+      if (existingRevision && existingRevision !== duplicate.expectedRevisionId) {
+        throw new Error(`Duplicate memory has conflicting expected revisions: ${duplicate.memoryId}`);
+      }
+      duplicateRevisions.set(duplicate.memoryId, duplicate.expectedRevisionId);
+    }
+    const duplicates = [...duplicateRevisions]
+      .map(([memoryId, expectedRevisionId]) => ({ memoryId, expectedRevisionId }))
+      .sort((left, right) => left.memoryId.localeCompare(right.memoryId));
+    const canonicalRequest = {
+      actorId,
+      canonicalMemoryId: input.canonicalMemoryId,
+      duplicates,
+      expectedCanonicalRevisionId: input.expectedCanonicalRevisionId,
+      metadata,
+      reason,
+    };
+    const requestHash = createHash('sha256')
+      .update(stableStringify(canonicalRequest), 'utf8')
+      .digest('hex');
+
+    const transaction = this.database.transaction((): string => {
+      if (idempotencyKey) {
+        const existing = this.getRow(
+          `SELECT id, request_hash FROM memory_merge_operations
+           WHERE canonical_memory_id = ? AND idempotency_key = ?`,
+          input.canonicalMemoryId,
+          idempotencyKey,
+        );
+        if (existing) {
+          if (String(existing.request_hash) !== requestHash) {
+            throw new Error(`Memory merge idempotency conflict for key: ${idempotencyKey}`);
+          }
+          return String(existing.id);
+        }
+      }
+
+      const canonical = this.getRow('SELECT * FROM memories WHERE id = ?', input.canonicalMemoryId);
+      if (!canonical) throw new Error(`Memory not found: ${input.canonicalMemoryId}`);
+      if (canonical.state !== 'active') throw new Error('Canonical memory must be active');
+      if (String(canonical.current_revision_id) !== input.expectedCanonicalRevisionId) {
+        throw new Error(
+          `Revision conflict: expected ${input.expectedCanonicalRevisionId}, current is ${String(canonical.current_revision_id)}`,
+        );
+      }
+      const canonicalRedirect = this.redirectTarget(input.canonicalMemoryId);
+      if (canonicalRedirect) {
+        throw new Error(
+          `Canonical memory is already merged; use canonical memory ${canonicalRedirect}`,
+        );
+      }
+
+      const duplicateRows = new Map<string, Row>();
+      for (const duplicate of duplicates) {
+        if (duplicate.memoryId === input.canonicalMemoryId) {
+          throw new Error('A canonical memory cannot be merged into itself');
+        }
+        const memory = this.getRow('SELECT * FROM memories WHERE id = ?', duplicate.memoryId);
+        if (!memory) throw new Error(`Memory not found: ${duplicate.memoryId}`);
+        if (String(memory.space_id) !== String(canonical.space_id)) {
+          throw new Error('Merged memories must belong to the same space');
+        }
+        if (String(memory.current_revision_id) !== duplicate.expectedRevisionId) {
+          throw new Error(
+            `Revision conflict for ${duplicate.memoryId}: expected ${duplicate.expectedRevisionId}, current is ${String(memory.current_revision_id)}`,
+          );
+        }
+        const existingRedirect = this.redirectTarget(duplicate.memoryId);
+        if (existingRedirect) {
+          throw new Error(
+            `Memory ${duplicate.memoryId} is already merged into ${existingRedirect}`,
+          );
+        }
+        duplicateRows.set(duplicate.memoryId, memory);
+      }
+
+      const duplicateIds = [...duplicateRows.keys()];
+      const duplicatePlaceholders = duplicateIds.map(() => '?').join(',');
+      const inheritedSourceIds =
+        duplicateIds.length === 0
+          ? []
+          : this.allRows(
+              `SELECT redirect.source_memory_id
+               FROM memory_redirect_events redirect
+               WHERE redirect.canonical_memory_id IN (${duplicatePlaceholders})
+                 AND NOT EXISTS (
+                   SELECT 1 FROM memory_redirect_events newer
+                   WHERE newer.source_memory_id = redirect.source_memory_id
+                     AND (
+                       newer.created_at > redirect.created_at
+                       OR (newer.created_at = redirect.created_at AND newer.id > redirect.id)
+                     )
+                 )
+               ORDER BY redirect.source_memory_id`,
+              ...duplicateIds,
+            ).map((row) => String(row.source_memory_id));
+
+      const latestState = this.getRow(
+        `SELECT MAX(recorded_at) AS recorded_at FROM memory_state_events
+         WHERE memory_id IN (${duplicatePlaceholders})`,
+        ...duplicateIds,
+      );
+      const previousTimestamp = latestState?.recorded_at
+        ? Date.parse(String(latestState.recorded_at))
+        : 0;
+      const timestamp = new Date(Math.max(Date.now(), previousTimestamp + 1)).toISOString();
+      const operationId = randomUUID();
+      this.database
+        .prepare(
+          `INSERT INTO memory_merge_operations(
+             id, space_id, canonical_memory_id, canonical_revision_id, actor_id, reason,
+             metadata_json, idempotency_key, request_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          operationId,
+          canonical.space_id,
+          input.canonicalMemoryId,
+          input.expectedCanonicalRevisionId,
+          actorId,
+          reason,
+          stableStringify(metadata),
+          idempotencyKey,
+          requestHash,
+          timestamp,
+        );
+      const insertMember = this.database.prepare(
+        `INSERT INTO memory_merge_members(
+           operation_id, duplicate_memory_id, duplicate_revision_id
+         ) VALUES (?, ?, ?)`,
+      );
+      const insertRedirect = this.database.prepare(
+        `INSERT INTO memory_redirect_events(
+           id, source_memory_id, canonical_memory_id, operation_id, direct, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      const archive = this.database.prepare(
+        `UPDATE memories SET state = 'archived', updated_at = ?
+         WHERE id = ? AND state = 'active' AND current_revision_id = ?`,
+      );
+      const insertStateEvent = this.database.prepare(
+        `INSERT INTO memory_state_events(id, memory_id, event_number, state, recorded_at)
+         SELECT ?, ?, COALESCE(MAX(event_number), 0) + 1, 'archived', ?
+         FROM memory_state_events WHERE memory_id = ?`,
+      );
+
+      for (const duplicate of duplicates) {
+        insertMember.run(operationId, duplicate.memoryId, duplicate.expectedRevisionId);
+        insertRedirect.run(
+          randomUUID(),
+          duplicate.memoryId,
+          input.canonicalMemoryId,
+          operationId,
+          1,
+          timestamp,
+        );
+        const memory = duplicateRows.get(duplicate.memoryId);
+        if (memory?.state === 'active') {
+          const archived = archive.run(
+            timestamp,
+            duplicate.memoryId,
+            duplicate.expectedRevisionId,
+          );
+          if (archived.changes !== 1) {
+            throw new Error(`Memory changed concurrently during merge: ${duplicate.memoryId}`);
+          }
+          insertStateEvent.run(randomUUID(), duplicate.memoryId, timestamp, duplicate.memoryId);
+        }
+      }
+      for (const sourceMemoryId of inheritedSourceIds) {
+        insertRedirect.run(
+          randomUUID(),
+          sourceMemoryId,
+          input.canonicalMemoryId,
+          operationId,
+          0,
+          timestamp,
+        );
+      }
+      return operationId;
+    });
+
+    return this.mergeResult(transaction.immediate());
+  }
+
   public createLink(input: {
     fromMemoryId: string;
     toMemoryId: string;
@@ -1358,6 +1783,9 @@ export class MemoryStore {
     assertTemporalRange(input.validFrom, input.validTo);
     const relation = input.relation.trim();
     if (!relation) throw new Error('relation must contain non-whitespace text');
+    if (relation.toLocaleLowerCase() === 'merged-into') {
+      throw new Error('The merged-into relationship is reserved; use memory_merge');
+    }
     const metadata = input.metadata ?? {};
     const metadataJson = stableStringify(metadata);
     const validFrom = input.validFrom ?? null;
@@ -1430,7 +1858,12 @@ export class MemoryStore {
 
   public unlink(linkId: string): MemoryLink {
     const existing = this.getRow('SELECT * FROM memory_links WHERE id = ?', linkId);
-    if (!existing) throw new Error(`Link not found: ${linkId}`);
+    if (!existing) {
+      if (this.getRow('SELECT 1 FROM memory_redirect_events WHERE id = ?', linkId)) {
+        throw new Error('Merge redirects cannot be unlinked');
+      }
+      throw new Error(`Link not found: ${linkId}`);
+    }
     if (existing.deleted_at !== null) return this.linkFromRow(existing);
     this.database
       .prepare('UPDATE memory_links SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
@@ -1440,7 +1873,7 @@ export class MemoryStore {
   }
 
   public linksFor(memoryId: string, atTime = now()): MemoryLink[] {
-    return this.allRows(
+    const links = this.allRows(
       `SELECT * FROM memory_links
            WHERE (from_memory_id = ? OR to_memory_id = ?)
              AND created_at <= ?
@@ -1455,6 +1888,90 @@ export class MemoryStore {
       atTime,
       atTime,
     ).map((row) => this.linkFromRow(row));
+    links.push(
+      ...this.redirectLinksForMany([memoryId], {
+        atTime,
+        relations: [],
+        direction: 'both',
+      }),
+    );
+    return links.sort(
+      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    );
+  }
+
+  private redirectLinksForMany(
+    memoryIds: string[],
+    options: {
+      atTime: string;
+      relations: string[];
+      direction: MemoryLinkDirection;
+    },
+  ): MemoryLink[] {
+    if (memoryIds.length === 0) return [];
+    if (
+      options.relations.length > 0 &&
+      !options.relations.some((relation) => relation.toLocaleLowerCase() === 'merged-into')
+    ) {
+      return [];
+    }
+    const placeholders = memoryIds.map(() => '?').join(',');
+    const endpointClause =
+      options.direction === 'outgoing'
+        ? `redirect.source_memory_id IN (${placeholders})`
+        : options.direction === 'incoming'
+          ? `redirect.canonical_memory_id IN (${placeholders})`
+          : `(redirect.source_memory_id IN (${placeholders})
+             OR redirect.canonical_memory_id IN (${placeholders}))`;
+    const endpointParameters =
+      options.direction === 'both' ? [...memoryIds, ...memoryIds] : memoryIds;
+    return this.allRows(
+      `SELECT redirect.*, source.space_id,
+              operation.actor_id AS merge_actor_id,
+              operation.reason AS merge_reason,
+              operation.metadata_json AS merge_metadata_json
+       FROM memory_redirect_events redirect
+       JOIN memories source ON source.id = redirect.source_memory_id
+       JOIN memory_merge_operations operation ON operation.id = redirect.operation_id
+       WHERE ${endpointClause}
+         AND redirect.created_at <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM memory_redirect_events newer
+           WHERE newer.source_memory_id = redirect.source_memory_id
+             AND newer.created_at <= ?
+             AND (
+               newer.created_at > redirect.created_at
+               OR (newer.created_at = redirect.created_at AND newer.id > redirect.id)
+             )
+         )
+       ORDER BY redirect.created_at, redirect.id`,
+      ...endpointParameters,
+      options.atTime,
+      options.atTime,
+    ).map((row) => {
+      const metadata: JsonObject = {
+        mergeOperationId: String(row.operation_id),
+        direct: Number(row.direct) === 1,
+      };
+      const actorId = optionalString(row.merge_actor_id);
+      const reason = optionalString(row.merge_reason);
+      const operationMetadata = parseObject(row.merge_metadata_json);
+      if (actorId) metadata.actorId = actorId;
+      if (reason) metadata.reason = reason;
+      if (Object.keys(operationMetadata).length > 0) metadata.operationMetadata = operationMetadata;
+      return {
+        id: String(row.id),
+        spaceId: String(row.space_id),
+        fromMemoryId: String(row.source_memory_id),
+        toMemoryId: String(row.canonical_memory_id),
+        relation: 'merged-into',
+        metadata,
+        validFrom: null,
+        validTo: null,
+        createdAt: String(row.created_at),
+        deletedAt: null,
+      };
+    });
   }
 
   private linksForMany(
@@ -1498,8 +2015,12 @@ export class MemoryStore {
       options.atTime,
       ...options.relations,
     );
-    for (const row of rows) {
-      const link = this.linkFromRow(row);
+    const links = rows.map((row) => this.linkFromRow(row));
+    links.push(...this.redirectLinksForMany(memoryIds, options));
+    links.sort(
+      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    );
+    for (const link of links) {
       if (options.direction !== 'incoming' && linksByMemoryId.has(link.fromMemoryId)) {
         linksByMemoryId.get(link.fromMemoryId)?.push(link);
       }
@@ -1744,6 +2265,16 @@ export class MemoryStore {
     const pendingCount = this.requireRow(
       "SELECT COUNT(*) AS count FROM index_jobs WHERE status = 'pending'",
     );
+    const logicalKeyCount = this.requireRow(
+      'SELECT COUNT(*) AS count FROM memories WHERE logical_key IS NOT NULL',
+    );
+    const mergeOperationCount = this.requireRow(
+      'SELECT COUNT(*) AS count FROM memory_merge_operations',
+    );
+    const redirectCounts = this.requireRow(
+      `SELECT COUNT(*) AS events, COUNT(DISTINCT source_memory_id) AS current
+       FROM memory_redirect_events`,
+    );
     return {
       database: this.database.name,
       schemaVersion: this.migrations.toVersion,
@@ -1755,6 +2286,12 @@ export class MemoryStore {
       stateEvents: Number(stateEventCount.count),
       modelProfiles: Number(modelProfileCount.count),
       pendingJobs: Number(pendingCount.count),
+      logicalKeys: Number(logicalKeyCount.count),
+      merges: {
+        operations: Number(mergeOperationCount.count),
+        currentRedirects: Number(redirectCounts.current),
+        redirectEvents: Number(redirectCounts.events),
+      },
     };
   }
 
@@ -1812,6 +2349,36 @@ export class MemoryStore {
       state: String(row.state),
       recordedAt: String(row.recorded_at),
     }));
+    const mergeOperations = this.allRows(
+      'SELECT * FROM memory_merge_operations ORDER BY created_at, id',
+    ).map((operation) => ({
+      id: String(operation.id),
+      spaceId: String(operation.space_id),
+      canonicalMemoryId: String(operation.canonical_memory_id),
+      canonicalRevisionId: String(operation.canonical_revision_id),
+      actorId: optionalString(operation.actor_id),
+      reason: optionalString(operation.reason),
+      metadata: parseObject(operation.metadata_json),
+      createdAt: String(operation.created_at),
+      members: this.allRows(
+        `SELECT duplicate_memory_id, duplicate_revision_id FROM memory_merge_members
+         WHERE operation_id = ? ORDER BY duplicate_memory_id`,
+        operation.id,
+      ).map((member) => ({
+        memoryId: String(member.duplicate_memory_id),
+        revisionId: String(member.duplicate_revision_id),
+      })),
+    }));
+    const redirectEvents = this.allRows(
+      'SELECT * FROM memory_redirect_events ORDER BY created_at, id',
+    ).map((redirect) => ({
+      id: String(redirect.id),
+      sourceMemoryId: String(redirect.source_memory_id),
+      canonicalMemoryId: String(redirect.canonical_memory_id),
+      operationId: String(redirect.operation_id),
+      direct: Number(redirect.direct) === 1,
+      createdAt: String(redirect.created_at),
+    }));
     return {
       exportedAt: now(),
       spaces: this.listSpaces(),
@@ -1825,6 +2392,8 @@ export class MemoryStore {
       links,
       feedback,
       stateEvents,
+      mergeOperations,
+      redirectEvents,
     };
   }
 
@@ -1843,6 +2412,27 @@ export class MemoryStore {
       const removeVector = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
       for (const segmentId of segmentIds) removeVector.run(segmentId);
     }
+    this.database
+      .prepare(
+        `DELETE FROM memory_redirect_events
+         WHERE source_memory_id = ? OR canonical_memory_id = ?`,
+      )
+      .run(memoryId, memoryId);
+    this.database
+      .prepare('DELETE FROM memory_merge_members WHERE duplicate_memory_id = ?')
+      .run(memoryId);
+    this.database
+      .prepare('DELETE FROM memory_merge_operations WHERE canonical_memory_id = ?')
+      .run(memoryId);
+    this.database
+      .prepare(
+        `DELETE FROM memory_merge_operations
+         WHERE NOT EXISTS (
+           SELECT 1 FROM memory_merge_members member
+           WHERE member.operation_id = memory_merge_operations.id
+         )`,
+      )
+      .run();
     this.database
       .prepare('DELETE FROM memory_links WHERE from_memory_id = ? OR to_memory_id = ?')
       .run(memoryId, memoryId);

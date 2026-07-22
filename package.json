@@ -40,7 +40,7 @@
   "author": "gmacev",
   "license": "MIT",
   "engines": {
-    "node": ">=22.9.0",
+    "node": ">=22.9.0 <23 || >=24 <25 || >=26 <27",
     "npm": ">=10.0.0"
   },
   "dependencies": {

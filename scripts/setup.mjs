@@ -37,7 +37,7 @@ function run(label, command, args, options = {}) {
   if (outcome.status !== 0) {
     if (label === 'Install locked Node dependencies') {
       throw new Error(
-        `${label} failed. Stop any MCP client using Simple Memory, then rerun npm run ${mode}; loaded native dependencies cannot be replaced while the server is running`,
+        `${label} failed. Review the npm error above. For EPERM or EBUSY, completely stop MCP clients using Simple Memory and rerun npm run ${mode}. For "No prebuilt binaries found", use a supported Node.js release (22.9+, 24, or 26; Node 24 LTS is recommended)`,
       );
     }
     throw new Error(`${label} failed with exit code ${String(outcome.status)}`);
@@ -65,18 +65,23 @@ function captured(command, args, options = {}) {
   });
 }
 
-function requireNode22() {
+function requireSupportedNode() {
   const [majorText = '0', minorText = '0'] = process.versions.node.split('.');
   const major = Number.parseInt(majorText, 10);
   const minor = Number.parseInt(minorText, 10);
-  if (
-    !Number.isFinite(major) ||
-    !Number.isFinite(minor) ||
-    major < 22 ||
-    (major === 22 && minor < 9)
-  ) {
-    throw new Error(`Node.js 22.9 or newer is required; found ${process.version}`);
-  }
+  const supported =
+    Number.isFinite(major) &&
+    Number.isFinite(minor) &&
+    ((major === 22 && minor >= 9) || major === 24 || major === 26);
+  if (supported) return;
+
+  const explanation =
+    Number.isFinite(major) && major >= 23 && major % 2 !== 0
+      ? `Node.js ${String(major)} is an odd-numbered, non-LTS release for which required native modules may not provide prebuilt binaries.`
+      : 'This Node.js release line has not been verified with the required native modules.';
+  throw new Error(
+    `${explanation} Use Node.js 22.9+, 24, or 26 (Node 24 LTS is recommended); found ${process.version}`,
+  );
 }
 
 function requireNpm10() {
@@ -294,7 +299,7 @@ function installPreferredTorchBackend(uv) {
 async function main() {
   const verificationDataDir = mkdtempSync(path.join(tmpdir(), `simple-memory-${mode}-`));
   try {
-    requireNode22();
+    requireSupportedNode();
     const npmVersion = requireNpm10();
     heading(`Using Node ${process.version} and npm ${npmVersion}`);
     if (mode === 'update') {

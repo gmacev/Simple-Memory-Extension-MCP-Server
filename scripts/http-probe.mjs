@@ -10,7 +10,6 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = mkdtempSync(path.join(tmpdir(), 'simple-memory-http-'));
-const token = 'simple-memory-live-probe-token';
 
 function assert(condition, message) {
   if (!condition) throw new Error(`HTTP probe assertion failed: ${message}`);
@@ -39,10 +38,22 @@ async function availablePort() {
 }
 
 function launch(overrides) {
+  const environment = { ...process.env };
+  for (const name of [
+    'SIMPLE_MEMORY_ACCESS_MODE',
+    'SIMPLE_MEMORY_FIXED_PRINCIPAL',
+    'SIMPLE_MEMORY_FIXED_ACCESS',
+    'SIMPLE_MEMORY_HTTP_PUBLIC_URL',
+    'SIMPLE_MEMORY_OAUTH_ISSUER',
+    'SIMPLE_MEMORY_OAUTH_AUDIENCE',
+    'SIMPLE_MEMORY_HTTP_TOKEN',
+  ]) {
+    delete environment[name];
+  }
   return spawn(process.execPath, [path.join(root, 'dist', 'index.js')], {
     cwd: root,
     env: {
-      ...process.env,
+      ...environment,
       SIMPLE_MEMORY_DATA_DIR: dataDir,
       SIMPLE_MEMORY_LOG_LEVEL: 'info',
       SIMPLE_MEMORY_MODELS: 'disabled',
@@ -73,6 +84,25 @@ async function waitForListening(child) {
   });
 }
 
+async function expectStartupFailure(child, expectedMessage) {
+  const output = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('HTTP server did not reject unsafe startup')), 15_000);
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(stderr);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+  assert(output.includes(expectedMessage), `startup failure must explain: ${expectedMessage}`);
+}
+
 async function stop(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill();
@@ -85,12 +115,12 @@ async function stop(child) {
   });
 }
 
-async function probeUnprotectedServer(port) {
+async function probeOpenLoopbackServer(port) {
   const allowedOrigin = `http://127.0.0.1:${port}`;
   const child = launch({
-    SIMPLE_MEMORY_HTTP_HOST: '0.0.0.0',
+    SIMPLE_MEMORY_ACCESS_MODE: 'open',
+    SIMPLE_MEMORY_HTTP_HOST: '127.0.0.1',
     SIMPLE_MEMORY_HTTP_PORT: String(port),
-    SIMPLE_MEMORY_HTTP_TOKEN: '',
     SIMPLE_MEMORY_HTTP_ALLOWED_ORIGINS: allowedOrigin,
   });
   let client;
@@ -102,7 +132,7 @@ async function probeUnprotectedServer(port) {
       headers: { Origin: 'https://attacker.example' },
     });
     assert(forbidden.status === 403, 'an unapproved Origin header must be rejected');
-    client = new Client({ name: 'simple-memory-http-unprotected-probe', version: '2.0.0' });
+    client = new Client({ name: 'simple-memory-http-open-probe', version: '2.3.0' });
     await client.connect(
       new StreamableHTTPClientTransport(endpoint, {
         requestInit: { headers: { Origin: allowedOrigin } },
@@ -112,7 +142,7 @@ async function probeUnprotectedServer(port) {
       name: 'memory_status',
       arguments: { probeModels: false },
     });
-    assert(!response.isError, 'HTTP tool invocation without a configured token');
+    assert(!response.isError, 'loopback open-mode HTTP tool invocation');
     toolResult(response);
   } finally {
     if (client) await client.close();
@@ -121,51 +151,37 @@ async function probeUnprotectedServer(port) {
 }
 
 async function run() {
-  const unprotectedPort = await availablePort();
-  await probeUnprotectedServer(unprotectedPort);
+  const openPort = await availablePort();
+  await probeOpenLoopbackServer(openPort);
 
-  const port = await availablePort();
-  const child = launch({
-    SIMPLE_MEMORY_HTTP_HOST: '127.0.0.1',
-    SIMPLE_MEMORY_HTTP_PORT: String(port),
-    SIMPLE_MEMORY_HTTP_TOKEN: token,
-  });
-  let client;
-  try {
-    await waitForListening(child);
-    const endpoint = new URL(`http://127.0.0.1:${port}/mcp`);
-    const unauthorized = await fetch(endpoint, { method: 'POST' });
-    assert(unauthorized.status === 401, 'missing bearer token must be rejected');
+  const unsafePort = await availablePort();
+  await expectStartupFailure(
+    launch({
+      SIMPLE_MEMORY_ACCESS_MODE: 'open',
+      SIMPLE_MEMORY_HTTP_HOST: '0.0.0.0',
+      SIMPLE_MEMORY_HTTP_PORT: String(unsafePort),
+      SIMPLE_MEMORY_HTTP_ALLOWED_ORIGINS: `http://127.0.0.1:${unsafePort}`,
+    }),
+    'Open HTTP access may only bind to loopback',
+  );
 
-    client = new Client({ name: 'simple-memory-http-probe', version: '2.0.0' });
-    const transport = new StreamableHTTPClientTransport(endpoint, {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
-    });
-    await client.connect(transport);
-    const tools = await client.listTools();
-    assert(
-      tools.tools.some((tool) => tool.name === 'memory_search'),
-      'HTTP tool discovery',
-    );
-    const response = await client.callTool({
-      name: 'memory_status',
-      arguments: { probeModels: false },
-    });
-    assert(!response.isError, 'HTTP tool invocation');
-    const status = toolResult(response);
-    assert(status.memories?.active === 0, 'empty status counters must be numeric zero');
-    return {
-      ok: true,
-      tokenOptional: true,
-      tokenProtection: true,
-      originValidation: true,
-      toolCount: tools.tools.length,
-      unauthorizedStatus: unauthorized.status,
-    };
-  } finally {
-    if (client) await client.close();
-    await stop(child);
-  }
+  const legacyPort = await availablePort();
+  await expectStartupFailure(
+    launch({
+      SIMPLE_MEMORY_HTTP_HOST: '127.0.0.1',
+      SIMPLE_MEMORY_HTTP_PORT: String(legacyPort),
+      SIMPLE_MEMORY_HTTP_TOKEN: 'obsolete-token',
+    }),
+    'SIMPLE_MEMORY_HTTP_TOKEN is no longer supported',
+  );
+
+  return {
+    ok: true,
+    openLoopback: true,
+    originValidation: true,
+    unauthenticatedNonLoopbackRefused: true,
+    legacySharedTokenRefused: true,
+  };
 }
 
 let outcome;

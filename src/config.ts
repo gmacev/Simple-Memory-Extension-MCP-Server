@@ -1,6 +1,10 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  type AccessConfiguration,
+  parseFixedAccess,
+} from './access/authorization.js';
 
 export interface AppConfig {
   dataDir: string;
@@ -14,6 +18,7 @@ export interface AppConfig {
   lexicalCandidates: number;
   semanticCandidates: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  access: AccessConfiguration;
 }
 
 function defaultDataDir(): string {
@@ -46,6 +51,53 @@ function integerEnvironment(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function booleanEnvironment(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw new Error(`${name} must be true, false, 1, or 0`);
+}
+
+function accessConfiguration(): AccessConfiguration {
+  if (process.env.SIMPLE_MEMORY_HTTP_TOKEN !== undefined) {
+    throw new Error(
+      'SIMPLE_MEMORY_HTTP_TOKEN is no longer supported. Use SIMPLE_MEMORY_ACCESS_MODE=oauth for protected HTTP, or remove the variable for trusted loopback-only open mode.',
+    );
+  }
+  const configuredMode = process.env.SIMPLE_MEMORY_ACCESS_MODE ?? 'open';
+  if (configuredMode !== 'open' && configuredMode !== 'fixed' && configuredMode !== 'oauth') {
+    throw new Error('SIMPLE_MEMORY_ACCESS_MODE must be open, fixed, or oauth');
+  }
+  const mode = configuredMode;
+  const access: AccessConfiguration = {
+    mode,
+    oauthAccessClaim: process.env.SIMPLE_MEMORY_OAUTH_ACCESS_CLAIM?.trim() || 'simple_memory_access',
+    allowUnauthenticatedNonLoopback: booleanEnvironment(
+      'SIMPLE_MEMORY_HTTP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK',
+      false,
+    ),
+  };
+  if (mode === 'fixed') {
+    const principal = process.env.SIMPLE_MEMORY_FIXED_PRINCIPAL?.trim();
+    const fixedAccess = process.env.SIMPLE_MEMORY_FIXED_ACCESS?.trim();
+    if (!principal) throw new Error('SIMPLE_MEMORY_FIXED_PRINCIPAL is required in fixed mode');
+    if (!fixedAccess) throw new Error('SIMPLE_MEMORY_FIXED_ACCESS is required in fixed mode');
+    access.fixedPrincipal = principal;
+    access.fixedGrants = parseFixedAccess(fixedAccess);
+  }
+  if (mode === 'oauth') {
+    const publicUrl = process.env.SIMPLE_MEMORY_HTTP_PUBLIC_URL?.trim();
+    const issuer = process.env.SIMPLE_MEMORY_OAUTH_ISSUER?.trim();
+    if (!publicUrl) throw new Error('SIMPLE_MEMORY_HTTP_PUBLIC_URL is required in oauth mode');
+    if (!issuer) throw new Error('SIMPLE_MEMORY_OAUTH_ISSUER is required in oauth mode');
+    access.httpPublicUrl = publicUrl;
+    access.oauthIssuer = issuer;
+    access.oauthAudience = process.env.SIMPLE_MEMORY_OAUTH_AUDIENCE?.trim() || publicUrl;
+  }
+  return access;
+}
+
 export function loadConfig(): AppConfig {
   const dataDir = path.resolve(process.env.SIMPLE_MEMORY_DATA_DIR ?? defaultDataDir());
   const pythonProjectPath = path.resolve(
@@ -76,5 +128,6 @@ export function loadConfig(): AppConfig {
     lexicalCandidates: integerEnvironment('SIMPLE_MEMORY_LEXICAL_CANDIDATES', 100),
     semanticCandidates: integerEnvironment('SIMPLE_MEMORY_SEMANTIC_CANDIDATES', 100),
     logLevel,
+    access: accessConfiguration(),
   };
 }

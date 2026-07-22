@@ -16,7 +16,9 @@ Simple Memory can help an agent remember:
 
 Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, relationships, and revision-specific feedback. Ordinary recall uses active, current, presently valid information. Review dates and feedback warnings can tell an agent that information may need confirmation without silently changing or suppressing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
 
-Multiple agents can safely share a space. An optional `logicalKey` gives one evolving memory a stable identity, revision checks prevent silent overwrites, and confirmed duplicates can be merged into a canonical memory without deleting their history. Similarity search only suggests possible duplicates; it never merges information automatically.
+Multiple agents can safely coordinate in a shared space. An optional `logicalKey` gives one evolving memory a stable identity, revision checks prevent silent overwrites, and confirmed duplicates can be merged into a canonical memory without deleting their history. Similarity search only suggests possible duplicates; it never merges information automatically.
+
+Spaces can also be access boundaries. Local installations remain open by default, while optional fixed or OAuth access modes can restrict each process, user, or agent to specific read, write, or manage permissions without creating separate databases.
 
 ## Models
 
@@ -79,6 +81,32 @@ tool_timeout_sec = 900
 
 Replace `cwd` with the absolute path to the cloned repository. The MCP client starts the server automatically; `npm start` does not need to run separately.
 
+### Optional space isolation
+
+Use `SIMPLE_MEMORY_ACCESS_MODE=fixed` for a scoped stdio process. Configure a trusted principal and its grants:
+
+```text
+SIMPLE_MEMORY_FIXED_PRINCIPAL=agent-a
+SIMPLE_MEMORY_FIXED_ACCESS={"spaces":{"agent-a-private":"write","project-shared":"read"}}
+```
+
+Use `SIMPLE_MEMORY_ACCESS_MODE=oauth` for a shared Streamable HTTP server. Simple Memory discovers the configured OAuth/OIDC issuer, verifies signed JWT access tokens through its JWKS, and enforces the token's scopes and space grants. The identity provider remains responsible for login and issuing tokens.
+
+OAuth tokens use `memory:read`, `memory:write`, or `memory:manage` and include a claim like:
+
+```json
+{
+  "simple_memory_access": {
+    "spaces": {
+      "agent-a-private": "write",
+      "project-shared": "read"
+    }
+  }
+}
+```
+
+Higher access includes lower access. `manage` is required for space creation, merges, and permanent deletion. In protected mode, creating a space requires an explicit ID already covered by a `manage` grant. Standard MCP OAuth protected-resource metadata is published automatically.
+
 ## Updating
 
 Completely stop the MCP client that is using Simple Memory, then update the repository and installation. The server must not be running because loaded native dependencies may need to be replaced:
@@ -113,8 +141,17 @@ All configuration is optional.
 | `SIMPLE_MEMORY_TRANSPORT` | `stdio` or Streamable `http` | `stdio` |
 | `SIMPLE_MEMORY_HTTP_HOST` | HTTP bind address | `127.0.0.1` |
 | `SIMPLE_MEMORY_HTTP_PORT` | HTTP port | `3000` |
-| `SIMPLE_MEMORY_HTTP_TOKEN` | Optional bearer token | Unset |
 | `SIMPLE_MEMORY_HTTP_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call HTTP | Local server origins; required for wildcard bind addresses |
+| `SIMPLE_MEMORY_ACCESS_MODE` | `open`, stdio `fixed`, or HTTP `oauth` access | `open` |
+| `SIMPLE_MEMORY_FIXED_PRINCIPAL` | Trusted actor identity used by a fixed stdio process | Required in `fixed` mode |
+| `SIMPLE_MEMORY_FIXED_ACCESS` | JSON object containing fixed per-space `read`, `write`, or `manage` grants | Required in `fixed` mode |
+| `SIMPLE_MEMORY_HTTP_PUBLIC_URL` | Public MCP resource URL, including `/mcp` | Required in `oauth` mode |
+| `SIMPLE_MEMORY_OAUTH_ISSUER` | OAuth/OIDC issuer discovered for metadata and JWKS | Required in `oauth` mode |
+| `SIMPLE_MEMORY_OAUTH_AUDIENCE` | Required JWT audience | Public MCP URL |
+| `SIMPLE_MEMORY_OAUTH_ACCESS_CLAIM` | JWT claim containing the `spaces` grant map | `simple_memory_access` |
+| `SIMPLE_MEMORY_HTTP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK` | Explicitly allow unsafe open HTTP outside loopback | `false` |
+
+Open HTTP is allowed on loopback only. OAuth public URLs and issuers must use HTTPS except during loopback development. The former `SIMPLE_MEMORY_HTTP_TOKEN` shared-secret setting is not supported.
 
 ### Retrieval and models
 
@@ -148,7 +185,7 @@ Standard Hugging Face variables such as `HF_HOME` can also be used to relocate t
 
 | Tool | Purpose |
 | --- | --- |
-| `space_create` | Create an isolated memory space. |
+| `space_create` | Create a memory space and optional access boundary. |
 | `space_list` | List memory spaces. |
 | `memory_create` | Store a new memory. |
 | `memory_revise` | Add a new immutable revision. |

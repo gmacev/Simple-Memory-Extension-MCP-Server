@@ -301,8 +301,21 @@ export class MemoryStore {
     };
   }
 
-  public listSpaces(): Row[] {
-    return this.allRows('SELECT * FROM spaces ORDER BY created_at, id').map((row) => ({
+  public listSpaces(spaceIds?: string[]): Row[] {
+    const clauses: string[] = [];
+    const parameters: unknown[] = [];
+    if (spaceIds !== undefined) {
+      if (spaceIds.length === 0) clauses.push('0 = 1');
+      else {
+        clauses.push(`id IN (${spaceIds.map(() => '?').join(',')})`);
+        parameters.push(...spaceIds);
+      }
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    return this.allRows(
+      `SELECT * FROM spaces ${where} ORDER BY created_at, id`,
+      ...parameters,
+    ).map((row) => ({
       id: row.id,
       name: row.name,
       description: row.description,
@@ -423,6 +436,16 @@ export class MemoryStore {
       return memoryId;
     });
     return this.getMemory(transaction.immediate());
+  }
+
+  public memorySpaceId(memoryId: string): string | null {
+    const row = this.getRow('SELECT space_id FROM memories WHERE id = ?', memoryId);
+    return row ? String(row.space_id) : null;
+  }
+
+  public linkSpaceId(linkId: string): string | null {
+    const row = this.getRow('SELECT space_id FROM memory_links WHERE id = ?', linkId);
+    return row ? String(row.space_id) : null;
   }
 
   public reviseMemory(
@@ -1090,6 +1113,13 @@ export class MemoryStore {
       clauses.push('m.space_id = ?');
       parameters.push(filters.spaceId);
     }
+    if (filters.spaceIds !== undefined) {
+      if (filters.spaceIds.length === 0) clauses.push('0 = 1');
+      else {
+        clauses.push(`m.space_id IN (${filters.spaceIds.map(() => '?').join(',')})`);
+        parameters.push(...filters.spaceIds);
+      }
+    }
     if (filters.state) {
       clauses.push('m.state = ?');
       parameters.push(filters.state);
@@ -1400,9 +1430,12 @@ export class MemoryStore {
     const expiryPoint = filters.atTime ?? now();
     clauses.push(`(${revisionAlias}.expires_at IS NULL OR ${revisionAlias}.expires_at > ?)`);
     parameters.push(expiryPoint);
-    if (filters.spaceIds && filters.spaceIds.length > 0) {
-      clauses.push(`m.space_id IN (${filters.spaceIds.map(() => '?').join(',')})`);
-      parameters.push(...filters.spaceIds);
+    if (filters.spaceIds !== undefined) {
+      if (filters.spaceIds.length === 0) clauses.push('0 = 1');
+      else {
+        clauses.push(`m.space_id IN (${filters.spaceIds.map(() => '?').join(',')})`);
+        parameters.push(...filters.spaceIds);
+      }
     }
     if (filters.kinds && filters.kinds.length > 0) {
       clauses.push(`${revisionAlias}.kind IN (${filters.kinds.map(() => '?').join(',')})`);
@@ -2246,7 +2279,18 @@ export class MemoryStore {
     };
   }
 
-  public status(): Row {
+  public status(spaceIds?: string[]): Row {
+    const scopedParameters = spaceIds ?? [];
+    const scopedWhere = (column: string): string => {
+      if (spaceIds === undefined) return '';
+      if (spaceIds.length === 0) return ' WHERE 0 = 1';
+      return ` WHERE ${column} IN (${spaceIds.map(() => '?').join(',')})`;
+    };
+    const scopedAnd = (column: string): string => {
+      if (spaceIds === undefined) return '';
+      if (spaceIds.length === 0) return ' AND 0 = 1';
+      return ` AND ${column} IN (${spaceIds.map(() => '?').join(',')})`;
+    };
     const counts = this.requireRow(
       `SELECT
           COUNT(*) AS total,
@@ -2255,25 +2299,52 @@ export class MemoryStore {
           COALESCE(SUM(CASE WHEN state = 'deleted' THEN 1 ELSE 0 END), 0) AS deleted,
           COALESCE(SUM(CASE WHEN index_status = 'ready' THEN 1 ELSE 0 END), 0) AS indexed,
           COALESCE(SUM(CASE WHEN index_status = 'lexical-only' THEN 1 ELSE 0 END), 0) AS lexical_only
-         FROM memories`,
+         FROM memories${scopedWhere('space_id')}`,
+      ...scopedParameters,
     );
-    const spaceCount = this.requireRow('SELECT COUNT(*) AS count FROM spaces');
-    const revisionCount = this.requireRow('SELECT COUNT(*) AS count FROM memory_revisions');
-    const segmentCount = this.requireRow('SELECT COUNT(*) AS count FROM memory_segments');
+    const spaceCount = this.requireRow(
+      `SELECT COUNT(*) AS count FROM spaces${scopedWhere('id')}`,
+      ...scopedParameters,
+    );
+    const revisionCount = this.requireRow(
+      `SELECT COUNT(*) AS count
+       FROM memory_revisions revision
+       JOIN memories memory ON memory.id = revision.memory_id${scopedWhere('memory.space_id')}`,
+      ...scopedParameters,
+    );
+    const segmentCount = this.requireRow(
+      `SELECT COUNT(*) AS count FROM memory_segments${scopedWhere('space_id')}`,
+      ...scopedParameters,
+    );
     const modelProfileCount = this.requireRow('SELECT COUNT(*) AS count FROM model_profiles');
-    const stateEventCount = this.requireRow('SELECT COUNT(*) AS count FROM memory_state_events');
+    const stateEventCount = this.requireRow(
+      `SELECT COUNT(*) AS count
+       FROM memory_state_events event
+       JOIN memories memory ON memory.id = event.memory_id${scopedWhere('memory.space_id')}`,
+      ...scopedParameters,
+    );
     const pendingCount = this.requireRow(
-      "SELECT COUNT(*) AS count FROM index_jobs WHERE status = 'pending'",
+      `SELECT COUNT(*) AS count
+       FROM index_jobs job
+       JOIN memory_revisions revision ON revision.id = job.revision_id
+       JOIN memories memory ON memory.id = revision.memory_id
+       WHERE job.status = 'pending'${scopedAnd('memory.space_id')}`,
+      ...scopedParameters,
     );
     const logicalKeyCount = this.requireRow(
-      'SELECT COUNT(*) AS count FROM memories WHERE logical_key IS NOT NULL',
+      `SELECT COUNT(*) AS count FROM memories
+       WHERE logical_key IS NOT NULL${scopedAnd('space_id')}`,
+      ...scopedParameters,
     );
     const mergeOperationCount = this.requireRow(
-      'SELECT COUNT(*) AS count FROM memory_merge_operations',
+      `SELECT COUNT(*) AS count FROM memory_merge_operations${scopedWhere('space_id')}`,
+      ...scopedParameters,
     );
     const redirectCounts = this.requireRow(
-      `SELECT COUNT(*) AS events, COUNT(DISTINCT source_memory_id) AS current
-       FROM memory_redirect_events`,
+      `SELECT COUNT(*) AS events, COUNT(DISTINCT redirect.source_memory_id) AS current
+       FROM memory_redirect_events redirect
+       JOIN memories memory ON memory.id = redirect.source_memory_id${scopedWhere('memory.space_id')}`,
+      ...scopedParameters,
     );
     return {
       database: this.database.name,

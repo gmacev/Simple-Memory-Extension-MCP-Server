@@ -98,8 +98,16 @@ export class MemoryService {
     return this.store.createSpace(input);
   }
 
-  public listSpaces(): ReturnType<MemoryStore['listSpaces']> {
-    return this.store.listSpaces();
+  public listSpaces(spaceIds?: string[]): ReturnType<MemoryStore['listSpaces']> {
+    return this.store.listSpaces(spaceIds);
+  }
+
+  public memorySpaceId(memoryId: string): string | null {
+    return this.store.memorySpaceId(memoryId);
+  }
+
+  public linkSpaceId(linkId: string): string | null {
+    return this.store.linkSpaceId(linkId);
   }
 
   public async createMemory(
@@ -316,7 +324,10 @@ export class MemoryService {
     return this.store.listFeedback(filters);
   }
 
-  public async status(probeModels = false): Promise<Record<string, unknown>> {
+  public async status(
+    probeModels = false,
+    options: { administrative?: boolean; spaceIds?: string[] } = {},
+  ): Promise<Record<string, unknown>> {
     let modelHealth: Awaited<ReturnType<ModelClient['health']>> | undefined;
     let modelError: string | undefined;
     if (probeModels && this.config.modelsEnabled) {
@@ -326,8 +337,24 @@ export class MemoryService {
         modelError = String(error);
       }
     }
+    const storageStatus = this.store.status(options.spaceIds);
+    if (options.administrative === false) {
+      return {
+        schemaVersion: storageStatus.schemaVersion,
+        vectorAvailable: storageStatus.vectorAvailable,
+        memories: storageStatus.memories,
+        spaces: storageStatus.spaces,
+        revisions: storageStatus.revisions,
+        segments: storageStatus.segments,
+        stateEvents: storageStatus.stateEvents,
+        pendingJobs: storageStatus.pendingJobs,
+        logicalKeys: storageStatus.logicalKeys,
+        merges: storageStatus.merges,
+        modelsEnabled: this.config.modelsEnabled,
+      };
+    }
     const result: Record<string, unknown> = {
-      ...this.store.status(),
+      ...storageStatus,
       modelsEnabled: this.config.modelsEnabled,
       modelLauncherPid: this.models.launcherPid,
       modelWorkerPid: this.models.workerPid,

@@ -170,6 +170,7 @@ export interface MemoryFeedbackListPage {
 
 export interface MemoryListFilters {
   spaceId?: string;
+  spaceIds?: string[];
   state?: MemoryState;
   kind?: string;
   tags?: string[];

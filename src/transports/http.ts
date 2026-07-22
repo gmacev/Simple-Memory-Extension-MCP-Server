@@ -1,4 +1,10 @@
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
+import { InsufficientScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import {
+  getOAuthProtectedResourceMetadataUrl,
+  mcpAuthMetadataRouter,
+} from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type {
   Transport,
@@ -6,12 +12,32 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk/types.js';
 import type { NextFunction, Request, Response } from 'express';
+import { memoryScopes, type AuthorizationService } from '../access/authorization.js';
+import { createOAuthRuntime } from '../access/oauth.js';
 import type { MemoryService } from '../application/memory-service.js';
+import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
 import { buildMcpServer } from '../mcp/server.js';
 
 function isLoopback(host: string): boolean {
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
+}
+
+function requireSecureRemoteUrl(value: string, label: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${label} must be a valid URL`);
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error(`${label} must not contain credentials, a query, or a fragment`);
+  }
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    throw new Error(`${label} must use HTTPS outside loopback development`);
+  }
+  return url;
 }
 
 function normalizeOrigin(value: string): string {
@@ -93,16 +119,29 @@ class ExactOptionalTransport implements Transport {
   }
 }
 
-export async function startHttpServer(service: MemoryService, logger: Logger): Promise<void> {
+export async function startHttpServer(
+  config: AppConfig,
+  service: MemoryService,
+  authorization: AuthorizationService,
+  logger: Logger,
+): Promise<void> {
   const host = process.env.SIMPLE_MEMORY_HTTP_HOST ?? '127.0.0.1';
   const port = Number.parseInt(process.env.SIMPLE_MEMORY_HTTP_PORT ?? '3000', 10);
-  const token = process.env.SIMPLE_MEMORY_HTTP_TOKEN?.trim() || undefined;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('SIMPLE_MEMORY_HTTP_PORT must be an integer from 1 to 65535');
+  }
   const origins = allowedOrigins(host, port);
-  if (!isLoopback(host) && !token) {
-    logger.warn('Streamable HTTP is exposed without authentication', {
-      host,
-      recommendation: 'Set SIMPLE_MEMORY_HTTP_TOKEN unless access is protected elsewhere',
-    });
+  if (
+    config.access.mode === 'open' &&
+    !isLoopback(host) &&
+    !config.access.allowUnauthenticatedNonLoopback
+  ) {
+    throw new Error(
+      'Open HTTP access may only bind to loopback. Use SIMPLE_MEMORY_ACCESS_MODE=oauth, or explicitly set SIMPLE_MEMORY_HTTP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK=true only behind a trusted external security boundary.',
+    );
+  }
+  if (config.access.mode === 'open' && !isLoopback(host)) {
+    logger.warn('Unauthenticated Streamable HTTP is enabled on a non-loopback interface', { host });
   }
   const app = createMcpExpressApp({ host });
   app.use((request: Request, response: Response, next: NextFunction) => {
@@ -117,15 +156,56 @@ export async function startHttpServer(service: MemoryService, logger: Logger): P
       id: null,
     });
   });
-  app.use((request: Request, response: Response, next: NextFunction) => {
-    if (!token || request.headers.authorization === `Bearer ${token}`) {
-      next();
-      return;
+  if (config.access.mode === 'oauth') {
+    if (!config.access.httpPublicUrl || !config.access.oauthIssuer) {
+      throw new Error('OAuth HTTP configuration is incomplete');
     }
-    response.status(401).json({ error: 'Unauthorized' });
-  });
+    const publicUrl = requireSecureRemoteUrl(
+      config.access.httpPublicUrl,
+      'SIMPLE_MEMORY_HTTP_PUBLIC_URL',
+    );
+    if (publicUrl.pathname !== '/mcp') {
+      throw new Error('SIMPLE_MEMORY_HTTP_PUBLIC_URL must identify the /mcp endpoint');
+    }
+    requireSecureRemoteUrl(config.access.oauthIssuer, 'SIMPLE_MEMORY_OAUTH_ISSUER');
+    const oauth = await createOAuthRuntime(config.access);
+    const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicUrl);
+    app.use(
+      mcpAuthMetadataRouter({
+        oauthMetadata: oauth.metadata,
+        resourceServerUrl: publicUrl,
+        scopesSupported: [...memoryScopes],
+        resourceName: 'Simple Memory',
+      }),
+    );
+    app.use(
+      '/mcp',
+      requireBearerAuth({
+        verifier: oauth.verifier,
+        resourceMetadataUrl,
+      }),
+      (request: Request, response: Response, next: NextFunction) => {
+        const scopes = request.auth?.scopes ?? [];
+        if (memoryScopes.some((scope) => scopes.includes(scope))) {
+          next();
+          return;
+        }
+        const error = new InsufficientScopeError(
+          'At least one Simple Memory OAuth scope is required',
+        );
+        response.set(
+          'WWW-Authenticate',
+          `Bearer error="insufficient_scope", error_description="${error.message}", scope="${memoryScopes.join(' ')}", resource_metadata="${resourceMetadataUrl}"`,
+        );
+        response.status(403).json({
+          error: 'insufficient_scope',
+          error_description: error.message,
+        });
+      },
+    );
+  }
   app.post('/mcp', async (request: Request, response: Response) => {
-    const server = buildMcpServer(service);
+    const server = buildMcpServer(service, authorization);
     const nativeTransport = new StreamableHTTPServerTransport({
       allowedOrigins: origins,
     });
@@ -160,6 +240,7 @@ export async function startHttpServer(service: MemoryService, logger: Logger): P
         host,
         port,
         path: '/mcp',
+        accessMode: config.access.mode,
         allowedOrigins: origins,
       });
       resolve();

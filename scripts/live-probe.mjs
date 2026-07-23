@@ -186,7 +186,8 @@ async function run() {
   );
   assert(
     deleteTool?.description?.includes('Permanently and irreversibly') &&
-      deleteTool.description.includes('all relationships'),
+      deleteTool.description.includes('ordinary relationships') &&
+      deleteTool.description.includes('merge redirects'),
     'delete description should disclose complete irreversible erasure',
   );
   assert(deleteTool?.annotations?.destructiveHint === true, 'delete must be marked destructive');

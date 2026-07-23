@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import type { AppConfig } from '../config.js';
 import type {
-  MemoryRecord,
+  MemorySearchRecord,
   SearchOptions,
   SearchResponse,
   SearchResult,
@@ -18,14 +18,14 @@ interface FusedCandidate {
   path: string;
   rerankSegments: string[];
   score: SearchScoreExplanation;
-  record?: MemoryRecord;
+  record?: MemorySearchRecord;
 }
 
 const RRF_CONSTANT = 60;
 const EXCERPT_LIMIT = 2_000;
 const EXCERPT_HEADER_LIMIT = 400;
 
-function contextualExcerpt(candidate: FusedCandidate & { record: MemoryRecord }): string {
+function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
   const lines = candidate.record.revision.searchableText.split('\n');
   const fieldPrefix = `${candidate.path}:`;
   const matchedIndex = lines.findIndex((line) => line.startsWith(fieldPrefix));
@@ -128,7 +128,7 @@ function addRanking(
   }
 }
 
-function rerankDocument(candidate: FusedCandidate & { record: MemoryRecord }): string {
+function rerankDocument(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
   const revision = candidate.record.revision;
   const context: string[] = [];
   if (revision.title) context.push(`Title: ${revision.title}`);
@@ -171,6 +171,32 @@ export class SearchEngine {
     const fused = new Map<string, FusedCandidate>();
     let degraded = false;
     let degradationReason: string | undefined;
+    const semanticCandidates =
+      mode === 'lexical'
+        ? null
+        : (async () => {
+            if (!this.config.modelsEnabled || !this.store.vectorAvailable) {
+              throw new Error('Semantic inference or vector storage is disabled');
+            }
+            const vector = await this.models.embedQuery(options.query);
+            const profile = await this.models.embeddingProfile();
+            if (profile.embedding_dimension !== vector.length) {
+              throw new Error('Embedding model dimension changed during query processing');
+            }
+            const modelProfileId = this.store.ensureModelProfile({
+              provider: 'huggingface',
+              model: profile.embedding_model,
+              modelRevision: profile.embedding_revision,
+              dimensions: vector.length,
+              instructionHash: profile.query_instruction_hash,
+            });
+            return this.store.semanticCandidates(
+              vector,
+              filters,
+              this.config.semanticCandidates,
+              modelProfileId,
+            );
+          })();
 
     addRanking(
       fused,
@@ -186,33 +212,9 @@ export class SearchEngine {
       );
     }
 
-    if (mode !== 'lexical') {
+    if (semanticCandidates) {
       try {
-        if (!this.config.modelsEnabled || !this.store.vectorAvailable) {
-          throw new Error('Semantic inference or vector storage is disabled');
-        }
-        const vector = await this.models.embedQuery(options.query);
-        const profile = await this.models.embeddingProfile();
-        if (profile.embedding_dimension !== vector.length) {
-          throw new Error('Embedding model dimension changed during query processing');
-        }
-        const modelProfileId = this.store.ensureModelProfile({
-          provider: 'huggingface',
-          model: profile.embedding_model,
-          modelRevision: profile.embedding_revision,
-          dimensions: vector.length,
-          instructionHash: profile.query_instruction_hash,
-        });
-        addRanking(
-          fused,
-          this.store.semanticCandidates(
-            vector,
-            filters,
-            this.config.semanticCandidates,
-            modelProfileId,
-          ),
-          'semantic',
-        );
+        addRanking(fused, await semanticCandidates, 'semantic');
       } catch (error) {
         degraded = true;
         degradationReason = `Semantic retrieval unavailable: ${String(error)}`;
@@ -224,6 +226,7 @@ export class SearchEngine {
     const recordsByRevisionId = this.store.getMemoriesByRevisionIds(
       [...fused.values()].map((candidate) => candidate.revisionId),
       options.atTime,
+      options.includeSourceMetadata ?? false,
     );
     for (const candidate of fused.values()) {
       const record = recordsByRevisionId.get(candidate.revisionId);
@@ -269,7 +272,7 @@ export class SearchEngine {
     }
 
     let ordered = [...fused.values()]
-      .filter((candidate): candidate is FusedCandidate & { record: MemoryRecord } =>
+      .filter((candidate): candidate is FusedCandidate & { record: MemorySearchRecord } =>
         Boolean(candidate.record),
       )
       .sort((left, right) => right.score.fusedScore - left.score.fusedScore);

@@ -116,7 +116,7 @@ export class MemoryService {
   ): Promise<MemoryRecord> {
     const created = this.store.createMemory(input, actor);
     try {
-      return await this.indexer.indexRevision(created.revision.id);
+      return await this.indexer.indexRevision(created.revision.id, false, created);
     } catch (error) {
       this.logger.error('Memory was stored but indexing failed', {
         memoryId: created.id,
@@ -135,7 +135,7 @@ export class MemoryService {
   ): Promise<MemoryRecord> {
     const revised = this.store.reviseMemory(memoryId, input, expectedRevisionId, actor);
     try {
-      return await this.indexer.indexRevision(revised.revision.id);
+      return await this.indexer.indexRevision(revised.revision.id, false, revised);
     } catch (error) {
       this.logger.error('Revision was stored but indexing failed', {
         memoryId,
@@ -163,6 +163,13 @@ export class MemoryService {
 
   public getHistory(memoryId: string): ReturnType<MemoryStore['getHistory']> {
     return this.store.getHistory(memoryId);
+  }
+
+  public getHistoryPage(
+    memoryId: string,
+    options: Parameters<MemoryStore['getHistoryPage']>[1],
+  ): ReturnType<MemoryStore['getHistoryPage']> {
+    return this.store.getHistoryPage(memoryId, options);
   }
 
   public listMemories(filters: MemoryListFilters): ReturnType<MemoryStore['listMemories']> {

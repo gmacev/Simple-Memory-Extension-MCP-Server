@@ -65,9 +65,13 @@ export class Indexer {
     return working;
   }
 
-  public async indexRevision(revisionId: string, alreadyClaimed = false): Promise<MemoryRecord> {
+  public async indexRevision(
+    revisionId: string,
+    alreadyClaimed = false,
+    preparedRecord?: MemoryRecord,
+  ): Promise<MemoryRecord> {
     if (!alreadyClaimed) this.store.markRevisionIndexRunning(revisionId);
-    const record = this.store.revisionForIndex(revisionId);
+    const record = preparedRecord ?? this.store.revisionForIndex(revisionId);
     let segments = createSegments({
       memoryId: record.id,
       revisionId: record.revision.id,

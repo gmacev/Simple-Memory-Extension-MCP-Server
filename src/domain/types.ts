@@ -86,6 +86,72 @@ export interface MemoryRecord {
   feedbackSummary: FeedbackSummary;
 }
 
+export interface MemorySummaryRevision {
+  id: string;
+  revisionNumber: number;
+  title: string | null;
+  kind: string | null;
+  tags: string[];
+  salience: number | null;
+  confidence: number | null;
+  validFrom: string | null;
+  validTo: string | null;
+  expiresAt: string | null;
+  reviewAfter: string | null;
+}
+
+export interface MemorySummaryRecord {
+  id: string;
+  spaceId: string;
+  logicalKey: string | null;
+  canonicalMemoryId: string | null;
+  mergedMemoryCount: number;
+  state: MemoryState;
+  updatedAt: string;
+  currentRevisionId: string;
+  indexStatus: IndexStatus;
+  revision: MemorySummaryRevision;
+  feedbackSummary: FeedbackSummary;
+}
+
+export interface MemorySearchRevision extends MemorySummaryRevision {
+  sources: SourceInput[];
+  observedAt: string | null;
+  recordedAt: string;
+  searchableText: string;
+}
+
+export interface MemorySearchRecord
+  extends Omit<MemorySummaryRecord, 'revision'> {
+  revision: MemorySearchRevision;
+}
+
+export interface MemoryHistoryRevision {
+  id: string;
+  revisionNumber: number;
+  parentRevisionId: string | null;
+  title: string | null;
+  kind: string | null;
+  tags: string[];
+  sources: SourceInput[];
+  salience: number | null;
+  confidence: number | null;
+  observedAt: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  expiresAt: string | null;
+  reviewAfter: string | null;
+  recordedAt: string;
+  actor: string | null;
+  content?: JsonValue;
+  metadata?: JsonObject;
+}
+
+export interface MemoryHistoryPage {
+  revisions: MemoryHistoryRevision[];
+  hasMore: boolean;
+}
+
 export interface LogicalMemoryResolution {
   logicalKey: string;
   matchedMemoryId: string;
@@ -180,7 +246,7 @@ export interface MemoryListFilters {
 }
 
 export interface MemoryListPage {
-  items: MemoryRecord[];
+  items: MemorySummaryRecord[];
   nextCursor: string | null;
 }
 
@@ -197,6 +263,7 @@ export interface SearchOptions {
   atTime?: string;
   validAt?: string;
   expandRelations?: boolean;
+  includeSourceMetadata?: boolean;
 }
 
 export interface SearchScoreExplanation {
@@ -209,7 +276,7 @@ export interface SearchScoreExplanation {
 }
 
 export interface SearchResult {
-  memory: MemoryRecord;
+  memory: MemorySearchRecord;
   excerpt: string;
   segmentPath: string;
   score: SearchScoreExplanation;
@@ -256,7 +323,7 @@ export interface MemoryTraversalPathStep {
 }
 
 export interface MemoryTraversalEntry {
-  memory: MemoryRecord;
+  memory: MemorySearchRecord;
   depth: number;
   via: MemoryLink | null;
   path: MemoryTraversalPathStep[];

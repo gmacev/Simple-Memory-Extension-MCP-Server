@@ -18,6 +18,8 @@ import type {
   MemoryFeedbackListFilters,
   MemoryFeedbackListPage,
   MemoryCreateInput,
+  MemoryHistoryPage,
+  MemoryHistoryRevision,
   MemoryInput,
   MemoryLink,
   MemoryLinkDirection,
@@ -28,7 +30,10 @@ import type {
   MemoryMergeResult,
   MemoryRecord,
   MemoryRevision,
+  MemorySearchRecord,
+  MemorySearchRevision,
   MemoryState,
+  MemorySummaryRecord,
   MemoryTraversalEntry,
   MemoryTraversalPathStep,
   SegmentRecord,
@@ -96,6 +101,21 @@ const joinedMemoryColumns = `
   m.updated_at AS memory_updated_at,
   m.current_revision_id AS memory_current_revision_id,
   m.index_status AS memory_index_status`;
+
+const searchRevisionColumns = `
+  r.id AS revision_id,
+  r.revision_number,
+  r.title,
+  r.kind,
+  r.salience,
+  r.confidence,
+  r.observed_at,
+  r.valid_from,
+  r.valid_to,
+  r.expires_at,
+  r.review_after,
+  r.recorded_at,
+  r.searchable_text`;
 
 function now(): string {
   return new Date().toISOString();
@@ -207,6 +227,7 @@ function canonicalRevisionPayload(
 export class MemoryStore {
   private readonly database: Database.Database;
   private readonly migrations: MigrationStatus;
+  private readonly ensuredModelProfileIds = new Set<string>();
   public readonly vectorAvailable: boolean;
 
   public constructor(
@@ -247,6 +268,7 @@ export class MemoryStore {
       vectorAvailable = true;
     }
     this.vectorAvailable = vectorAvailable;
+    this.database.pragma('optimize = 0x10002');
   }
 
   private ensureDefaultSpace(): void {
@@ -345,6 +367,7 @@ export class MemoryStore {
       provider: input.provider,
     });
     const id = createHash('sha256').update(identity).digest('hex');
+    if (this.ensuredModelProfileIds.has(id)) return id;
     this.database
       .prepare(
         `INSERT OR IGNORE INTO model_profiles(
@@ -360,6 +383,7 @@ export class MemoryStore {
         input.instructionHash,
         now(),
       );
+    this.ensuredModelProfileIds.add(id);
     return id;
   }
 
@@ -639,7 +663,10 @@ export class MemoryStore {
     });
   }
 
-  private loadRevisionRelations(revisionIds: string[]): RevisionRelations {
+  private loadRevisionRelations(
+    revisionIds: string[],
+    includeSourceMetadata = true,
+  ): RevisionRelations {
     const uniqueIds = [...new Set(revisionIds)];
     const tagsByRevisionId = new Map<string, string[]>();
     const sourcesByRevisionId = new Map<string, SourceInput[]>();
@@ -658,8 +685,11 @@ export class MemoryStore {
         tags.push(String(row.tag));
         tagsByRevisionId.set(revisionId, tags);
       }
+      const sourceColumns = includeSourceMetadata
+        ? '*'
+        : `id, revision_id, uri, label, type, observed_at, '{}' AS metadata_json`;
       for (const row of this.allRows(
-        `SELECT * FROM revision_sources
+        `SELECT ${sourceColumns} FROM revision_sources
          WHERE revision_id IN (${placeholders}) ORDER BY revision_id, id`,
         ...batch,
       )) {
@@ -670,6 +700,27 @@ export class MemoryStore {
       }
     }
     return { sourcesByRevisionId, tagsByRevisionId };
+  }
+
+  private loadRevisionTags(revisionIds: string[]): Map<string, string[]> {
+    const uniqueIds = [...new Set(revisionIds)];
+    const tagsByRevisionId = new Map<string, string[]>();
+    for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+      const batch = uniqueIds.slice(offset, offset + 500);
+      if (batch.length === 0) continue;
+      const placeholders = batch.map(() => '?').join(',');
+      for (const row of this.allRows(
+        `SELECT revision_id, tag FROM revision_tags
+         WHERE revision_id IN (${placeholders}) ORDER BY revision_id, tag`,
+        ...batch,
+      )) {
+        const revisionId = String(row.revision_id);
+        const tags = tagsByRevisionId.get(revisionId) ?? [];
+        tags.push(String(row.tag));
+        tagsByRevisionId.set(revisionId, tags);
+      }
+    }
+    return tagsByRevisionId;
   }
 
   private feedbackFromRow(row: Row): MemoryFeedback {
@@ -779,6 +830,61 @@ export class MemoryStore {
       recordedAt: String(row.recorded_at),
       actor: optionalString(row.actor),
       contentHash: String(row.content_hash),
+      searchableText: String(row.searchable_text),
+    };
+  }
+
+  private historyRevisionFromRow(
+    row: Row,
+    relations: RevisionRelations,
+    includeContent: boolean,
+  ): MemoryHistoryRevision {
+    const revisionId = String(row.revision_id ?? row.id);
+    const revision: MemoryHistoryRevision = {
+      id: revisionId,
+      revisionNumber: Number(row.revision_number),
+      parentRevisionId: optionalString(row.parent_revision_id),
+      title: optionalString(row.title),
+      kind: optionalString(row.kind),
+      tags: relations.tagsByRevisionId.get(revisionId) ?? [],
+      sources: relations.sourcesByRevisionId.get(revisionId) ?? [],
+      salience: optionalNumber(row.salience),
+      confidence: optionalNumber(row.confidence),
+      observedAt: optionalString(row.observed_at),
+      validFrom: optionalString(row.valid_from),
+      validTo: optionalString(row.valid_to),
+      expiresAt: optionalString(row.expires_at),
+      reviewAfter: optionalString(row.review_after),
+      recordedAt: String(row.recorded_at),
+      actor: optionalString(row.actor),
+    };
+    if (includeContent) {
+      revision.content = parseJsonValue(String(row.content_json));
+      revision.metadata = parseObject(row.metadata_json);
+    }
+    return revision;
+  }
+
+  private searchRevisionFromRow(
+    row: Row,
+    relations: RevisionRelations,
+  ): MemorySearchRevision {
+    const revisionId = String(row.revision_id);
+    return {
+      id: revisionId,
+      revisionNumber: Number(row.revision_number),
+      title: optionalString(row.title),
+      kind: optionalString(row.kind),
+      tags: relations.tagsByRevisionId.get(revisionId) ?? [],
+      sources: relations.sourcesByRevisionId.get(revisionId) ?? [],
+      salience: optionalNumber(row.salience),
+      confidence: optionalNumber(row.confidence),
+      observedAt: optionalString(row.observed_at),
+      validFrom: optionalString(row.valid_from),
+      validTo: optionalString(row.valid_to),
+      expiresAt: optionalString(row.expires_at),
+      reviewAfter: optionalString(row.review_after),
+      recordedAt: String(row.recorded_at),
       searchableText: String(row.searchable_text),
     };
   }
@@ -902,6 +1008,71 @@ export class MemoryStore {
     };
   }
 
+  private summaryMemoryFromJoinedRow(
+    row: Row,
+    tagsByRevisionId: Map<string, string[]>,
+    feedbackSummaries: Map<string, FeedbackSummary>,
+    identities: Map<string, MemoryIdentityInfo>,
+  ): MemorySummaryRecord {
+    const memoryId = String(row.memory_record_id);
+    const revisionId = String(row.revision_id);
+    const identity = identities.get(memoryId);
+    return {
+      id: memoryId,
+      spaceId: String(row.memory_space_id),
+      logicalKey: identity?.logicalKey ?? null,
+      canonicalMemoryId: identity?.canonicalMemoryId ?? null,
+      mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
+      state: z.enum(['active', 'archived', 'deleted']).parse(row.memory_state),
+      updatedAt: String(row.memory_updated_at),
+      currentRevisionId: String(row.memory_current_revision_id),
+      indexStatus: z
+        .enum(['pending', 'ready', 'lexical-only', 'failed'])
+        .parse(row.memory_index_status),
+      revision: {
+        id: revisionId,
+        revisionNumber: Number(row.revision_number),
+        title: optionalString(row.title),
+        kind: optionalString(row.kind),
+        tags: tagsByRevisionId.get(revisionId) ?? [],
+        salience: optionalNumber(row.salience),
+        confidence: optionalNumber(row.confidence),
+        validFrom: optionalString(row.valid_from),
+        validTo: optionalString(row.valid_to),
+        expiresAt: optionalString(row.expires_at),
+        reviewAfter: optionalString(row.review_after),
+      },
+      feedbackSummary: feedbackSummaries.get(revisionId) ?? emptyFeedbackSummary(revisionId),
+    };
+  }
+
+  private searchMemoryFromJoinedRow(
+    row: Row,
+    relations: RevisionRelations,
+    feedbackSummaries: Map<string, FeedbackSummary>,
+    identities: Map<string, MemoryIdentityInfo>,
+    state?: MemoryState,
+  ): MemorySearchRecord {
+    const memoryId = String(row.memory_record_id);
+    const revisionId = String(row.revision_id);
+    const identity = identities.get(memoryId);
+    return {
+      id: memoryId,
+      spaceId: String(row.memory_space_id),
+      logicalKey: identity?.logicalKey ?? null,
+      canonicalMemoryId: identity?.canonicalMemoryId ?? null,
+      mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
+      state: state ?? z.enum(['active', 'archived', 'deleted']).parse(row.memory_state),
+      updatedAt: String(row.memory_updated_at),
+      currentRevisionId: String(row.memory_current_revision_id),
+      indexStatus: z
+        .enum(['pending', 'ready', 'lexical-only', 'failed'])
+        .parse(row.memory_index_status),
+      revision: this.searchRevisionFromRow(row, relations),
+      feedbackSummary: feedbackSummaries.get(revisionId) ?? emptyFeedbackSummary(revisionId),
+    };
+  }
+
   public getMemory(
     memoryId: string,
     options: { revisionId?: string; atTime?: string } = {},
@@ -973,14 +1144,15 @@ export class MemoryStore {
   public getMemoriesByRevisionIds(
     revisionIds: string[],
     atTime?: string,
-  ): Map<string, MemoryRecord> {
+    includeSourceMetadata = false,
+  ): Map<string, MemorySearchRecord> {
     const uniqueRevisionIds = [...new Set(revisionIds)];
-    const records = new Map<string, MemoryRecord>();
+    const records = new Map<string, MemorySearchRecord>();
     if (uniqueRevisionIds.length === 0) return records;
 
     const revisionPlaceholders = uniqueRevisionIds.map(() => '?').join(',');
     const rows = this.allRows(
-      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
+      `SELECT ${joinedMemoryColumns}, ${searchRevisionColumns}
        FROM memory_revisions r
        JOIN memories m ON m.id = r.memory_id
        WHERE r.id IN (${revisionPlaceholders})`,
@@ -988,6 +1160,7 @@ export class MemoryStore {
     );
     const relations = this.loadRevisionRelations(
       rows.map((row) => String(row.revision_id)),
+      includeSourceMetadata,
     );
     const feedbackSummaries = this.loadFeedbackSummaries(
       rows.map((row) => String(row.revision_id)),
@@ -1022,7 +1195,7 @@ export class MemoryStore {
       const memoryId = String(row.memory_record_id);
       const historicalState = atTime ? statesByMemoryId.get(memoryId) : undefined;
       if (atTime && !historicalState) continue;
-      const record = this.memoryFromJoinedRow(
+      const record = this.searchMemoryFromJoinedRow(
         row,
         relations,
         feedbackSummaries,
@@ -1034,14 +1207,17 @@ export class MemoryStore {
     return records;
   }
 
-  private getMemoriesByIdsAtTime(memoryIds: string[], atTime: string): Map<string, MemoryRecord> {
+  private getMemoriesByIdsAtTime(
+    memoryIds: string[],
+    atTime: string,
+  ): Map<string, MemorySearchRecord> {
     const uniqueMemoryIds = [...new Set(memoryIds)];
-    const records = new Map<string, MemoryRecord>();
+    const records = new Map<string, MemorySearchRecord>();
     if (uniqueMemoryIds.length === 0) return records;
 
     const placeholders = uniqueMemoryIds.map(() => '?').join(',');
     const rows = this.allRows(
-      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
+      `SELECT ${joinedMemoryColumns}, ${searchRevisionColumns}
        FROM memories m
        JOIN (
          SELECT memory_id, MAX(revision_number) AS revision_number
@@ -1054,9 +1230,11 @@ export class MemoryStore {
       ...uniqueMemoryIds,
       atTime,
     );
-    const relations = this.loadRevisionRelations(
-      rows.map((row) => String(row.revision_id)),
-    );
+    const revisionIds = rows.map((row) => String(row.revision_id));
+    const relations: RevisionRelations = {
+      tagsByRevisionId: this.loadRevisionTags(revisionIds),
+      sourcesByRevisionId: new Map(),
+    };
     const feedbackSummaries = this.loadFeedbackSummaries(
       rows.map((row) => String(row.revision_id)),
       atTime,
@@ -1087,7 +1265,7 @@ export class MemoryStore {
       if (!state) continue;
       records.set(
         memoryId,
-        this.memoryFromJoinedRow(row, relations, feedbackSummaries, identities, state),
+        this.searchMemoryFromJoinedRow(row, relations, feedbackSummaries, identities, state),
       );
     }
     return records;
@@ -1104,6 +1282,48 @@ export class MemoryStore {
     );
     const relations = this.loadRevisionRelations(rows.map((row) => String(row.revision_id)));
     return rows.map((row) => this.revisionFromRow(row, relations));
+  }
+
+  public getHistoryPage(
+    memoryId: string,
+    options: {
+      beforeRevisionNumber?: number;
+      includeContent: boolean;
+      limit: number;
+    },
+  ): MemoryHistoryPage {
+    if (!this.database.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
+      throw new Error(`Memory not found: ${memoryId}`);
+    }
+    const columns = options.includeContent
+      ? `id AS revision_id, revision_number, parent_revision_id, title, kind, content_json,
+         metadata_json, salience, confidence, observed_at, valid_from, valid_to, expires_at,
+         review_after, recorded_at, actor`
+      : `id AS revision_id, revision_number, parent_revision_id, title, kind, salience,
+         confidence, observed_at, valid_from, valid_to, expires_at, review_after, recorded_at,
+         actor`;
+    const rows = this.allRows(
+      `SELECT ${columns}
+       FROM memory_revisions
+       WHERE memory_id = ? ${options.beforeRevisionNumber ? 'AND revision_number < ?' : ''}
+       ORDER BY revision_number DESC
+       LIMIT ?`,
+      memoryId,
+      ...(options.beforeRevisionNumber ? [options.beforeRevisionNumber] : []),
+      options.limit + 1,
+    );
+    const hasMore = rows.length > options.limit;
+    const pageRows = rows.slice(0, options.limit);
+    const relations = this.loadRevisionRelations(
+      pageRows.map((row) => String(row.revision_id)),
+      options.includeContent,
+    );
+    return {
+      revisions: pageRows.map((row) =>
+        this.historyRevisionFromRow(row, relations, options.includeContent),
+      ),
+      hasMore,
+    };
   }
 
   public listMemories(filters: MemoryListFilters = {}): MemoryListPage {
@@ -1160,7 +1380,17 @@ export class MemoryStore {
     const limit = Math.min(filters.limit ?? 50, 200);
     parameters.push(limit + 1);
     const rows = this.allRows(
-      `SELECT ${joinedMemoryColumns}, r.*, r.id AS revision_id
+      `SELECT ${joinedMemoryColumns},
+              r.id AS revision_id,
+              r.revision_number,
+              r.title,
+              r.kind,
+              r.salience,
+              r.confidence,
+              r.valid_from,
+              r.valid_to,
+              r.expires_at,
+              r.review_after
          FROM memories m JOIN memory_revisions r ON r.id = m.current_revision_id
          WHERE ${clauses.join(' AND ')}
          ORDER BY m.updated_at DESC, m.id DESC LIMIT ?`,
@@ -1168,15 +1398,14 @@ export class MemoryStore {
     );
     const hasMore = rows.length > limit;
     const pageRows = rows.slice(0, limit);
-    const relations = this.loadRevisionRelations(
-      pageRows.map((row) => String(row.revision_id)),
-    );
+    const revisionIds = pageRows.map((row) => String(row.revision_id));
+    const tagsByRevisionId = this.loadRevisionTags(revisionIds);
     const feedbackSummaries = this.loadFeedbackSummaries(
-      pageRows.map((row) => String(row.revision_id)),
+      revisionIds,
     );
     const identities = this.loadIdentityInfo(pageRows);
     const items = pageRows.map((row) =>
-      this.memoryFromJoinedRow(row, relations, feedbackSummaries, identities),
+      this.summaryMemoryFromJoinedRow(row, tagsByRevisionId, feedbackSummaries, identities),
     );
     const last = pageRows.at(-1);
     return {
@@ -2549,6 +2778,7 @@ export class MemoryStore {
   }
 
   public close(): void {
+    this.database.pragma('optimize');
     this.database.close();
   }
 }

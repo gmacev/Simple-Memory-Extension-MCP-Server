@@ -14,11 +14,7 @@ Simple Memory can help an agent remember:
 - Plans, preferences, notes, and long-running personal projects
 - Relationships and dependencies between stored information
 
-Memories support revisions, provenance, time-aware retrieval, semantic search, archiving, relationships, and revision-specific feedback. Ordinary recall uses active, current, presently valid information. Review dates and feedback warnings can tell an agent that information may need confirmation without silently changing or suppressing it. Search is multilingual and combines exact, lexical, and semantic retrieval.
-
-Multiple agents can safely coordinate in a shared space. An optional `logicalKey` gives one evolving memory a stable identity, revision checks prevent silent overwrites, and confirmed duplicates can be merged into a canonical memory without deleting their history. Similarity search only suggests possible duplicates; it never merges information automatically.
-
-Spaces can also be access boundaries. Local installations remain open by default, while optional fixed or OAuth access modes can restrict each process, user, or agent to specific read, write, or manage permissions without creating separate databases.
+Memories stay local and persistent. Agents can search, revise, connect, archive, and flag them for review over time. Multiple agents can coordinate safely with logical keys and revision checks, while optional access isolation can limit who may use each space.
 
 ## Models
 
@@ -62,50 +58,9 @@ cd Simple-Memory-Extension-MCP-Server
 npm run setup
 ```
 
-Or just point your agent to this repo.
+Or ask your agent to set up Simple Memory from this repository.
 
-Setup installs the Node and Python dependencies, downloads any missing models, selects the best available GPU or CPU backend, builds the server, and verifies the installation. The models are public, so a Hugging Face key is not required.
-
-Python, `uv`, and `curl` do not need to be installed beforehand. Setup downloads the official `uv` installer through Node.js, and `uv` installs the managed Python 3.12 runtime.
-
-Configure your MCP client to launch the server through stdio. Example Codex configuration:
-
-```toml
-[mcp_servers.simple-memory]
-command = "node"
-args = ["dist/index.js"]
-cwd = "/absolute/path/to/Simple-Memory-Extension-MCP-Server"
-startup_timeout_sec = 120
-tool_timeout_sec = 900
-```
-
-Replace `cwd` with the absolute path to the cloned repository. The MCP client starts the server automatically; `npm start` does not need to run separately.
-
-### Optional space isolation
-
-Use `SIMPLE_MEMORY_ACCESS_MODE=fixed` for a scoped stdio process. Configure a trusted principal and its grants:
-
-```text
-SIMPLE_MEMORY_FIXED_PRINCIPAL=agent-a
-SIMPLE_MEMORY_FIXED_ACCESS={"spaces":{"agent-a-private":"write","project-shared":"read"}}
-```
-
-Use `SIMPLE_MEMORY_ACCESS_MODE=oauth` for a shared Streamable HTTP server. Simple Memory discovers the configured OAuth/OIDC issuer, verifies signed JWT access tokens through its JWKS, and enforces the token's scopes and space grants. The identity provider remains responsible for login and issuing tokens.
-
-OAuth tokens use `memory:read`, `memory:write`, or `memory:manage` and include a claim like:
-
-```json
-{
-  "simple_memory_access": {
-    "spaces": {
-      "agent-a-private": "write",
-      "project-shared": "read"
-    }
-  }
-}
-```
-
-Higher access includes lower access. `manage` is required for space creation, merges, and permanent deletion. In protected mode, creating a space requires an explicit ID already covered by a `manage` grant. Standard MCP OAuth protected-resource metadata is published automatically.
+The first setup downloads the models if they are not already cached.
 
 ## Updating
 
@@ -118,9 +73,79 @@ npm run update
 
 Restart the MCP client afterward.
 
+## Connect your agent
+
+Configure your MCP client to launch the server through stdio. The client starts the server automatically; you do not need to run `npm start` separately.
+
+<details>
+<summary>Codex</summary>
+
+Run:
+
+```bash
+codex mcp add simple-memory -- node /absolute/path/to/Simple-Memory-Extension-MCP-Server/dist/index.js
+```
+
+</details>
+
+<details>
+<summary>Claude Code</summary>
+
+Run:
+
+```bash
+claude mcp add --scope user simple-memory -- node /absolute/path/to/Simple-Memory-Extension-MCP-Server/dist/index.js
+```
+
+</details>
+
+<details>
+<summary>Antigravity (Google)</summary>
+
+Add this to `~/.gemini/config/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "simple-memory": {
+      "command": "node",
+      "args": ["/absolute/path/to/Simple-Memory-Extension-MCP-Server/dist/index.js"]
+    }
+  }
+}
+```
+
+</details>
+
+## Available tools
+
+| Tool | Purpose |
+| --- | --- |
+| `space_create` | Create a memory space and optional access boundary. |
+| `space_list` | List memory spaces. |
+| `memory_create` | Store a new memory. |
+| `memory_revise` | Add a new immutable revision. |
+| `memory_merge` | Redirect confirmed duplicates to one canonical memory while preserving them. |
+| `memory_get` | Read a current or historical memory. |
+| `memory_get_by_key` | Resolve an exact logical key to its canonical memory. |
+| `memory_history` | Read revision history. |
+| `memory_list` | List active memory summaries by default, with filters and pagination. |
+| `memory_search` | Search by exact text, meaning, metadata, provenance, state, or time. |
+| `memory_archive` | Reversibly remove a memory from normal recall while preserving it. |
+| `memory_restore` | Return an archived memory to normal recall. |
+| `memory_delete` | Permanently erase a memory and all related data. |
+| `memory_link` | Idempotently create a relationship between memories. |
+| `memory_unlink` | Remove a relationship. |
+| `memory_traverse` | Explore connected memories with paths, filters, ranking, and pagination. |
+| `memory_feedback` | Record standardized content or query-specific retrieval feedback for a revision. |
+| `memory_feedback_list` | Read compact or detailed feedback history. |
+| `memory_status` | Inspect storage, indexing, and model health. |
+
+Agents can also read complete memories and revision histories through MCP resources.
+
 ## Environment variables
 
-All configuration is optional.
+All configuration is optional; the defaults are suitable for a normal local installation.
 
 ### General
 
@@ -153,6 +178,20 @@ All configuration is optional.
 
 Open HTTP is allowed on loopback only. OAuth public URLs and issuers must use HTTPS except during loopback development. The former `SIMPLE_MEMORY_HTTP_TOKEN` shared-secret setting is not supported.
 
+### Access control for shared use
+
+Most local installations do not need this: a stdio server is open to the trusted agent that starts it.
+
+Use `fixed` when separate local agent configurations share one database but should be limited to particular spaces. Give each configuration a trusted identity and its allowed spaces:
+
+```text
+SIMPLE_MEMORY_ACCESS_MODE=fixed
+SIMPLE_MEMORY_FIXED_PRINCIPAL=agent-a
+SIMPLE_MEMORY_FIXED_ACCESS={"spaces":{"agent-a-private":"write","project-shared":"read"}}
+```
+
+Use `oauth` when a shared HTTP server serves separate users or agents. Your identity provider authenticates callers; Simple Memory enforces the access grants carried by their tokens.
+
 ### Retrieval and models
 
 | Variable | Purpose | Default |
@@ -180,32 +219,6 @@ Open HTTP is allowed on loopback only. OAuth public URLs and issuers must use HT
 | `SIMPLE_MEMORY_PYTHON_PROJECT` | Path to the model-runtime project | Repository `python` directory |
 
 Standard Hugging Face variables such as `HF_HOME` can also be used to relocate the shared model cache.
-
-## Available tools
-
-| Tool | Purpose |
-| --- | --- |
-| `space_create` | Create a memory space and optional access boundary. |
-| `space_list` | List memory spaces. |
-| `memory_create` | Store a new memory. |
-| `memory_revise` | Add a new immutable revision. |
-| `memory_merge` | Redirect confirmed duplicates to one canonical memory while preserving them. |
-| `memory_get` | Read a current or historical memory. |
-| `memory_get_by_key` | Resolve an exact logical key to its canonical memory. |
-| `memory_history` | Read revision history. |
-| `memory_list` | List active memory summaries by default, with filters and pagination. |
-| `memory_search` | Search by exact text, meaning, metadata, provenance, state, or time. |
-| `memory_archive` | Reversibly remove a memory from normal recall while preserving it. |
-| `memory_restore` | Return an archived memory to normal recall. |
-| `memory_delete` | Permanently erase a memory and all related data. |
-| `memory_link` | Idempotently create a relationship between memories. |
-| `memory_unlink` | Remove a relationship. |
-| `memory_traverse` | Explore connected memories with paths, filters, ranking, and pagination. |
-| `memory_feedback` | Record standardized content or query-specific retrieval feedback for a revision. |
-| `memory_feedback_list` | Read compact or detailed feedback history. |
-| `memory_status` | Inspect storage, indexing, and model health. |
-
-Agents can also read complete memories and revision histories through MCP resources.
 
 ## License
 

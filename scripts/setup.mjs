@@ -37,7 +37,12 @@ function run(label, command, args, options = {}) {
   if (outcome.status !== 0) {
     if (label === 'Install locked Node dependencies') {
       throw new Error(
-        `${label} failed. Review the npm error above. For EPERM or EBUSY, completely stop MCP clients using Simple Memory and rerun npm run ${mode}. For "No prebuilt binaries found", use a supported Node.js release (22.9+, 24, or 26; Node 24 LTS is recommended)`,
+        `${label} failed. Review the npm error above. For EPERM or EBUSY, completely stop MCP clients using Simple Memory and rerun npm run ${mode}. For native-module errors, use the latest Node.js LTS release and rerun the command`,
+      );
+    }
+    if (label === 'Verify native SQLite runtime') {
+      throw new Error(
+        `${label} failed. The installed native dependencies are not compatible with Node ${process.version} on this system. Rerun npm run ${mode}; if installation still fails, use the latest Node.js LTS release`,
       );
     }
     throw new Error(`${label} failed with exit code ${String(outcome.status)}`);
@@ -66,22 +71,33 @@ function captured(command, args, options = {}) {
 }
 
 function requireSupportedNode() {
-  const [majorText = '0', minorText = '0'] = process.versions.node.split('.');
+  const [majorText = '0'] = process.versions.node.split('.');
   const major = Number.parseInt(majorText, 10);
-  const minor = Number.parseInt(minorText, 10);
-  const supported =
-    Number.isFinite(major) &&
-    Number.isFinite(minor) &&
-    ((major === 22 && minor >= 9) || major === 24 || major === 26);
-  if (supported) return;
+  if (Number.isFinite(major) && major >= 22) return;
+  throw new Error(`Node.js 22 or newer is required; found ${process.version}`);
+}
 
-  const explanation =
-    Number.isFinite(major) && major >= 23 && major % 2 !== 0
-      ? `Node.js ${String(major)} is an odd-numbered, non-LTS release for which required native modules may not provide prebuilt binaries.`
-      : 'This Node.js release line has not been verified with the required native modules.';
-  throw new Error(
-    `${explanation} Use Node.js 22.9+, 24, or 26 (Node 24 LTS is recommended); found ${process.version}`,
-  );
+function verifyNativeSqlite() {
+  const probe = `
+    import Database from 'better-sqlite3';
+    import * as sqliteVec from 'sqlite-vec';
+
+    const database = new Database(':memory:');
+    try {
+      sqliteVec.load(database);
+      database.exec('CREATE VIRTUAL TABLE vectors USING vec0(embedding float[4])');
+      database.prepare('INSERT INTO vectors(rowid, embedding) VALUES (1, ?)').run(
+        Buffer.from(new Float32Array([1, 0, 0, 0]).buffer),
+      );
+      const result = database
+        .prepare('SELECT sqlite_version() AS sqliteVersion, vec_version() AS vectorVersion')
+        .get();
+      process.stdout.write(JSON.stringify(result) + '\\n');
+    } finally {
+      database.close();
+    }
+  `;
+  run('Verify native SQLite runtime', process.execPath, ['--input-type=module', '--eval', probe]);
 }
 
 function requireNpm10() {
@@ -308,6 +324,7 @@ async function main() {
       );
     }
     run('Install locked Node dependencies', npmCommand, npmArguments(['ci']));
+    verifyNativeSqlite();
     const uv = locateUv() ?? (await installUv());
     run('Synchronize locked Python model environment', uv, [
       'sync',

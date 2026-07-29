@@ -77,6 +77,8 @@ Restart the MCP client afterward.
 
 Configure your MCP client to launch the server through stdio. The client starts the server automatically; you do not need to run `npm start` separately.
 
+Simple Memory supports MCP 2026-07-28 and automatically remains compatible with 2025-era stdio and Streamable HTTP clients. HTTP requests are stateless, while memories remain durable in the shared SQLite database.
+
 <details>
 <summary>Codex</summary>
 

@@ -1,4 +1,4 @@
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 export const accessModes = ['open', 'fixed', 'oauth'] as const;
@@ -80,6 +80,18 @@ export function globalLevelFromScopes(scopes: readonly string[]): SpaceAccessLev
   if (scopes.includes('memory:write')) return 'write';
   if (scopes.includes('memory:read')) return 'read';
   return null;
+}
+
+export function expandMemoryScopes(scopes: readonly string[]): string[] {
+  const expanded = new Set(scopes);
+  if (expanded.has('memory:manage')) {
+    expanded.add('memory:write');
+    expanded.add('memory:read');
+  }
+  if (expanded.has('memory:write')) {
+    expanded.add('memory:read');
+  }
+  return [...expanded];
 }
 
 export function oauthAuthExtra(context: OAuthAccessContext): Record<string, unknown> {

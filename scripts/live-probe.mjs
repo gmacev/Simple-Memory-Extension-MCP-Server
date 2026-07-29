@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 
@@ -109,7 +109,10 @@ function toolResult(response) {
 }
 
 async function connect() {
-  const client = new Client({ name: 'simple-memory-live-probe', version: '2.0.0' });
+  const client = new Client(
+    { name: 'simple-memory-live-probe', version: '3.0.0' },
+    { versionNegotiation: { mode: 'auto' } },
+  );
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(root, 'dist', 'index.js')],

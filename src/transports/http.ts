@@ -1,23 +1,28 @@
-import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
-import { InsufficientScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import {
+  createMcpExpressApp,
   getOAuthProtectedResourceMetadataUrl,
   mcpAuthMetadataRouter,
-} from '@modelcontextprotocol/sdk/server/auth/router.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type {
-  Transport,
-  TransportSendOptions,
-} from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk/types.js';
-import type { NextFunction, Request, Response } from 'express';
-import { memoryScopes, type AuthorizationService } from '../access/authorization.js';
+  requireBearerAuth,
+} from '@modelcontextprotocol/express';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import { createMcpHandler } from '@modelcontextprotocol/server';
+import type { RequestHandler } from 'express';
+import type { Server as HttpServer } from 'node:http';
+import {
+  memoryScopes,
+  type MemoryScope,
+  type AuthorizationService,
+  type SpaceAccessLevel,
+} from '../access/authorization.js';
 import { createOAuthRuntime } from '../access/oauth.js';
 import type { MemoryService } from '../application/memory-service.js';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
-import { buildMcpServer } from '../mcp/server.js';
+import { buildMcpServer, mcpToolAccessLevels } from '../mcp/server.js';
+
+export interface HttpServerHandle {
+  close(): Promise<void>;
+}
 
 function isLoopback(host: string): boolean {
   const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
@@ -96,27 +101,48 @@ function allowedOrigins(host: string, port: number): string[] {
   return [normalizeOrigin(`http://${urlHost(host)}:${String(port)}`)];
 }
 
-class ExactOptionalTransport implements Transport {
-  public onclose?: () => void;
-  public onerror?: (error: Error) => void;
-  public onmessage?: <T extends JSONRPCMessage>(message: T, extra?: MessageExtraInfo) => void;
-
-  public constructor(public readonly inner: StreamableHTTPServerTransport) {}
-
-  public async start(): Promise<void> {
-    this.inner.onclose = () => this.onclose?.();
-    this.inner.onerror = (error) => this.onerror?.(error);
-    this.inner.onmessage = (message, extra) => this.onmessage?.(message, extra);
-    await this.inner.start();
+function decodeMcpHeader(value: string): string | null {
+  const prefix = '=?base64?';
+  const suffix = '?=';
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return value;
+  const encoded = value.slice(prefix.length, -suffix.length);
+  try {
+    return Buffer.from(encoded, 'base64').toString('utf8');
+  } catch {
+    return null;
   }
+}
 
-  public send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
-    return this.inner.send(message, options);
-  }
+function scopeForLevel(level: SpaceAccessLevel): MemoryScope {
+  if (level === 'manage') return 'memory:manage';
+  if (level === 'write') return 'memory:write';
+  return 'memory:read';
+}
 
-  public close(): Promise<void> {
-    return this.inner.close();
+function toolAccessLevel(name: string): SpaceAccessLevel | null {
+  for (const [toolName, level] of Object.entries(mcpToolAccessLevels)) {
+    if (toolName === name) return level;
   }
+  return null;
+}
+
+function requiredScope(request: Parameters<RequestHandler>[0]): MemoryScope {
+  if (request.header('Mcp-Method') !== 'tools/call') return 'memory:read';
+  const rawName = request.header('Mcp-Name');
+  if (!rawName) return 'memory:read';
+  const name = decodeMcpHeader(rawName);
+  if (!name) return 'memory:read';
+  const level = toolAccessLevel(name);
+  return level ? scopeForLevel(level) : 'memory:read';
+}
+
+function closeHttpServer(server: HttpServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 export async function startHttpServer(
@@ -124,7 +150,7 @@ export async function startHttpServer(
   service: MemoryService,
   authorization: AuthorizationService,
   logger: Logger,
-): Promise<void> {
+): Promise<HttpServerHandle> {
   const host = process.env.SIMPLE_MEMORY_HTTP_HOST ?? '127.0.0.1';
   const port = Number.parseInt(process.env.SIMPLE_MEMORY_HTTP_PORT ?? '3000', 10);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -143,8 +169,13 @@ export async function startHttpServer(
   if (config.access.mode === 'open' && !isLoopback(host)) {
     logger.warn('Unauthenticated Streamable HTTP is enabled on a non-loopback interface', { host });
   }
-  const app = createMcpExpressApp({ host });
-  app.use((request: Request, response: Response, next: NextFunction) => {
+
+  const app = createMcpExpressApp({
+    host,
+    allowedOrigins: [...new Set(origins.map((origin) => new URL(origin).hostname))],
+    jsonLimit: '2mb',
+  });
+  app.use((request, response, next) => {
     const origin = request.headers.origin;
     if (origin === undefined || origins.includes(origin)) {
       next();
@@ -156,6 +187,7 @@ export async function startHttpServer(
       id: null,
     });
   });
+
   if (config.access.mode === 'oauth') {
     if (!config.access.httpPublicUrl || !config.access.oauthIssuer) {
       throw new Error('OAuth HTTP configuration is incomplete');
@@ -167,7 +199,10 @@ export async function startHttpServer(
     if (publicUrl.pathname !== '/mcp') {
       throw new Error('SIMPLE_MEMORY_HTTP_PUBLIC_URL must identify the /mcp endpoint');
     }
-    requireSecureRemoteUrl(config.access.oauthIssuer, 'SIMPLE_MEMORY_OAUTH_ISSUER');
+    const issuer = requireSecureRemoteUrl(
+      config.access.oauthIssuer,
+      'SIMPLE_MEMORY_OAUTH_ISSUER',
+    );
     const oauth = await createOAuthRuntime(config.access);
     const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicUrl);
     app.use(
@@ -176,75 +211,65 @@ export async function startHttpServer(
         resourceServerUrl: publicUrl,
         scopesSupported: [...memoryScopes],
         resourceName: 'Simple Memory',
+        dangerouslyAllowInsecureIssuerUrl: issuer.protocol === 'http:',
       }),
     );
-    app.use(
-      '/mcp',
-      requireBearerAuth({
-        verifier: oauth.verifier,
-        resourceMetadataUrl,
-      }),
-      (request: Request, response: Response, next: NextFunction) => {
-        const scopes = request.auth?.scopes ?? [];
-        if (memoryScopes.some((scope) => scopes.includes(scope))) {
-          next();
-          return;
-        }
-        const error = new InsufficientScopeError(
-          'At least one Simple Memory OAuth scope is required',
-        );
-        response.set(
-          'WWW-Authenticate',
-          `Bearer error="insufficient_scope", error_description="${error.message}", scope="${memoryScopes.join(' ')}", resource_metadata="${resourceMetadataUrl}"`,
-        );
-        response.status(403).json({
-          error: 'insufficient_scope',
-          error_description: error.message,
-        });
-      },
+    const scopeMiddleware = new Map<MemoryScope, RequestHandler>(
+      memoryScopes.map((scope) => [
+        scope,
+        requireBearerAuth({
+          verifier: oauth.verifier,
+          requiredScopes: [scope],
+          resourceMetadataUrl,
+        }),
+      ]),
     );
-  }
-  app.post('/mcp', async (request: Request, response: Response) => {
-    const server = buildMcpServer(service, authorization);
-    const nativeTransport = new StreamableHTTPServerTransport({
-      allowedOrigins: origins,
-    });
-    const transport = new ExactOptionalTransport(nativeTransport);
-    response.on('close', () => {
-      void transport.close();
-      void server.close();
-    });
-    try {
-      await server.connect(transport);
-      await nativeTransport.handleRequest(request, response, request.body);
-    } catch (error) {
-      logger.error('Streamable HTTP request failed', { error: String(error) });
-      if (!response.headersSent) {
-        response.status(500).json({
-          jsonrpc: '2.0',
-          error: { code: -32603, message: 'Internal server error' },
-          id: null,
-        });
+    app.use('/mcp', (request, response, next) => {
+      const middleware = scopeMiddleware.get(requiredScope(request));
+      if (!middleware) {
+        response.status(500).json({ error: 'server_error' });
+        return;
       }
-    }
-  });
-  app.get('/mcp', (_request: Request, response: Response) => {
-    response.status(405).json({ error: 'Stateless MCP endpoint accepts POST requests' });
-  });
-  app.delete('/mcp', (_request: Request, response: Response) => {
-    response.status(405).json({ error: 'Stateless MCP endpoint has no sessions to delete' });
-  });
-  await new Promise<void>((resolve, reject) => {
-    const listener = app.listen(port, host, () => {
-      logger.info('Simple Memory MCP listening with Streamable HTTP', {
-        host,
-        port,
-        path: '/mcp',
-        accessMode: config.access.mode,
-        allowedOrigins: origins,
-      });
-      resolve();
+      middleware(request, response, next);
     });
-    listener.once('error', reject);
+  }
+
+  const handler = createMcpHandler(
+    ({ authInfo }) =>
+      buildMcpServer(service, authorization, authorization.context(authInfo)),
+    {
+      legacy: 'stateless',
+      responseMode: 'auto',
+      onerror: (error) => logger.error('MCP HTTP request failed', { error: error.message }),
+    },
+  );
+  const nodeHandler = toNodeHandler(handler, {
+    onerror: (error) => logger.error('MCP Node HTTP adapter failed', { error: error.message }),
   });
+  app.all('/mcp', (request, response) => {
+    void nodeHandler(request, response, request.body);
+  });
+
+  const listener = await new Promise<HttpServer>((resolve, reject) => {
+    const server = app.listen(port, host, () => resolve(server));
+    server.once('error', reject);
+  });
+  logger.info('Simple Memory MCP listening with stateless Streamable HTTP', {
+    host,
+    port,
+    path: '/mcp',
+    accessMode: config.access.mode,
+    allowedOrigins: origins,
+  });
+
+  let closed = false;
+  return {
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      const listenerClosed = closeHttpServer(listener);
+      await handler.close();
+      await listenerClosed;
+    },
+  };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { AuthorizationService } from './access/authorization.js';
 import { createMemoryService } from './application/create-service.js';
 import { loadConfig } from './config.js';
@@ -12,10 +12,12 @@ async function main(): Promise<void> {
   const logger = new Logger(config.logLevel);
   const authorization = new AuthorizationService(config.access);
   const service = createMemoryService(config);
+  let closeTransport = async (): Promise<void> => {};
   let closing = false;
   const close = async (): Promise<void> => {
     if (closing) return;
     closing = true;
+    await closeTransport();
     await service.close();
   };
   process.once('SIGINT', () => void close().finally(() => process.exit(0)));
@@ -26,14 +28,23 @@ async function main(): Promise<void> {
     if (config.access.mode === 'fixed') {
       throw new Error('SIMPLE_MEMORY_ACCESS_MODE=fixed is only supported with stdio transport');
     }
-    await startHttpServer(config, service, authorization, logger);
+    const http = await startHttpServer(config, service, authorization, logger);
+    closeTransport = () => http.close();
     return;
   }
   if (config.access.mode === 'oauth') {
     throw new Error('SIMPLE_MEMORY_ACCESS_MODE=oauth requires Streamable HTTP transport');
   }
-  const server = buildMcpServer(service, authorization);
-  await server.connect(new StdioServerTransport());
+  const accessContext = authorization.context();
+  const stdio = serveStdio(
+    () => buildMcpServer(service, authorization, accessContext),
+    {
+      legacy: 'serve',
+      onerror: (error) => logger.error('MCP stdio request failed', { error: error.message }),
+    },
+  );
+  closeTransport = () => stdio.close();
+  process.stdin.once('end', () => void close());
   logger.info('Simple Memory MCP listening on stdio');
 }
 

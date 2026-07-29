@@ -5,8 +5,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = mkdtempSync(path.join(tmpdir(), 'simple-memory-http-'));
@@ -75,7 +74,7 @@ async function waitForListening(child) {
     };
     child.stderr.on('data', (chunk) => {
       stderr += chunk.toString('utf8');
-      if (stderr.includes('listening with Streamable HTTP')) finish(resolve);
+      if (stderr.includes('listening with stateless Streamable HTTP')) finish(resolve);
     });
     child.once('exit', (code) =>
       finish(() => reject(new Error(`HTTP server exited with ${String(code)}: ${stderr}`))),
@@ -132,7 +131,10 @@ async function probeOpenLoopbackServer(port) {
       headers: { Origin: 'https://attacker.example' },
     });
     assert(forbidden.status === 403, 'an unapproved Origin header must be rejected');
-    client = new Client({ name: 'simple-memory-http-open-probe', version: '2.3.0' });
+    client = new Client(
+      { name: 'simple-memory-http-open-probe', version: '3.0.0' },
+      { versionNegotiation: { mode: 'auto' } },
+    );
     await client.connect(
       new StreamableHTTPClientTransport(endpoint, {
         requestInit: { headers: { Origin: allowedOrigin } },

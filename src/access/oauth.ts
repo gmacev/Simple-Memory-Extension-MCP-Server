@@ -1,19 +1,25 @@
-import { discoverAuthorizationServerMetadata } from '@modelcontextprotocol/sdk/client/auth.js';
-import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-import { OAuthMetadataSchema, type OAuthMetadata } from '@modelcontextprotocol/sdk/shared/auth.js';
+import {
+  discoverAuthorizationServerMetadata,
+  type AuthorizationServerMetadata,
+} from '@modelcontextprotocol/client';
+import {
+  type AuthInfo,
+  OAuthError,
+  OAuthErrorCode,
+  type OAuthTokenVerifier,
+} from '@modelcontextprotocol/server';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import * as z from 'zod/v4';
 import type { AccessConfiguration, OAuthAccessContext } from './authorization.js';
 import {
+  expandMemoryScopes,
   globalLevelFromScopes,
   oauthAuthExtra,
   parseAccessClaim,
 } from './authorization.js';
 
 export interface OAuthRuntime {
-  metadata: OAuthMetadata;
+  metadata: AuthorizationServerMetadata;
   verifier: OAuthTokenVerifier;
 }
 
@@ -76,7 +82,6 @@ export async function createOAuthRuntime(
       `OAuth issuer mismatch: configured ${issuerIdentifier}, discovered ${metadataIdentity.issuer}`,
     );
   }
-  const metadata = OAuthMetadataSchema.parse(discovered);
   const jwks = createRemoteJWKSet(new URL(metadataIdentity.jwks_uri));
 
   const verifier: OAuthTokenVerifier = {
@@ -89,7 +94,7 @@ export async function createOAuthRuntime(
         const subject = stringClaim(verified.payload, 'sub');
         if (!subject) throw new Error('Token subject is missing');
         if (typeof verified.payload.exp !== 'number') throw new Error('Token expiry is missing');
-        const scopes = tokenScopes(verified.payload);
+        const scopes = expandMemoryScopes(tokenScopes(verified.payload));
         const recognizedLevel = globalLevelFromScopes(scopes);
         const globalLevel = recognizedLevel ?? 'read';
         const grants = recognizedLevel ? parseAccessClaim(verified.payload[accessClaim]) : {};
@@ -111,10 +116,10 @@ export async function createOAuthRuntime(
           extra: oauthAuthExtra(context),
         };
       } catch (error) {
-        if (error instanceof InvalidTokenError) throw error;
-        throw new InvalidTokenError('Invalid or expired access token');
+        if (OAuthError.isInstance(error)) throw error;
+        throw new OAuthError(OAuthErrorCode.InvalidToken, 'Invalid or expired access token');
       }
     },
   };
-  return { metadata, verifier };
+  return { metadata: discovered, verifier };
 }

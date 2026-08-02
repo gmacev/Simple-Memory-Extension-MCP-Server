@@ -695,7 +695,7 @@ export function buildMcpServer(
     {
       title: 'Get memory',
       description:
-        'Read a complete current or historical memory after search, listing, or an exact ID. atTime selects what the system had recorded by then; use memory_search validAt for real-world validity.',
+        'Read a complete current or historical memory, including content, provenance, and feedback summary. atTime selects what the system had recorded by then; use memory_search validAt for real-world validity.',
       inputSchema: z.object({
         memoryId: z.string().uuid(),
         revisionId: z.string().uuid().optional(),
@@ -743,7 +743,7 @@ export function buildMcpServer(
     {
       title: 'Get memory history',
       description:
-        "Inspect a memory's immutable revision history, newest first. Include content only when needed; use nextCursor for more pages.",
+        "Inspect compact revision history, newest first. Set includeContent:true for revision content and full source metadata; use nextCursor for more pages.",
       inputSchema: z.object({
         memoryId: z.string().uuid(),
         includeContent: z.boolean().optional(),
@@ -809,7 +809,7 @@ export function buildMcpServer(
     {
       title: 'Search memories',
       description:
-        'Search durable context before work that may depend on it or before creating a possible duplicate. auto is hybrid with reranking, fast skips reranking, quality forces it, lexical uses full text, and semantic uses embeddings. validAt selects real-world validity; atTime selects recorded history. explain adds ranking and timing diagnostics; confidence and salience describe the stored memory, not query relevance.',
+        'Search durable context before dependent work or creating a possible duplicate. Results are compact: explain adds ranking and timing diagnostics, while includeSourceMetadata adds source metadata. auto is hybrid with reranking, fast skips reranking, quality forces it, lexical uses full text, and semantic uses embeddings. validAt selects real-world validity; atTime selects recorded history. Confidence and salience describe stored memory, not query relevance.',
       inputSchema: z.object({
         query: z.string().min(1).max(10_000),
         spaceIds: z.array(z.string()).max(100).optional(),
@@ -969,7 +969,7 @@ export function buildMcpServer(
     {
       title: 'Traverse memory relationships',
       description:
-        'Explore explicit relationship paths from a memory. Filter by relationship or direction, optionally rank with a query, and use explain only for ranking diagnostics. Keep query, filters, direction, and depth unchanged when using nextCursor.',
+        'Explore compact relationship paths from a memory. Filter by relationship or direction, optionally rank with a query, and set explain:true for ranking diagnostics. Keep query, filters, direction, and depth unchanged when using nextCursor.',
       inputSchema: z.object({
         memoryId: z.string().uuid(),
         maxDepth: z.number().int().min(0).max(5).optional(),
@@ -1074,7 +1074,7 @@ export function buildMcpServer(
     {
       title: 'List memory feedback',
       description:
-        'Review append-only feedback history for a memory or revision. Filter by scope or atTime; results are compact by default, with details available on request.',
+        'Review compact append-only feedback history for a memory or revision. Filter by scope or atTime; set includeDetails:true for query, note, metadata, and legacy values.',
       inputSchema: z.object({
         memoryId: z.string().uuid(),
         revisionId: z.string().uuid().optional(),

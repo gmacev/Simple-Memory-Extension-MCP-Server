@@ -333,7 +333,7 @@ export class MemoryService {
 
   public async status(
     probeModels = false,
-    options: { administrative?: boolean; spaceIds?: string[] } = {},
+    options: { administrative?: boolean; includeDetails?: boolean; spaceIds?: string[] } = {},
   ): Promise<Record<string, unknown>> {
     let modelHealth: Awaited<ReturnType<ModelClient['health']>> | undefined;
     let modelError: string | undefined;
@@ -345,6 +345,24 @@ export class MemoryService {
       }
     }
     const storageStatus = this.store.status(options.spaceIds);
+    if (!options.includeDetails && !probeModels) {
+      const memories = z
+        .object({
+          total: z.number(),
+          active: z.number(),
+          archived: z.number(),
+          indexed: z.number(),
+          lexical_only: z.number(),
+        })
+        .parse(storageStatus.memories);
+      return {
+        schemaVersion: storageStatus.schemaVersion,
+        vectorAvailable: storageStatus.vectorAvailable,
+        memories,
+        pendingJobs: storageStatus.pendingJobs,
+        modelsEnabled: this.config.modelsEnabled,
+      };
+    }
     if (options.administrative === false) {
       return {
         schemaVersion: storageStatus.schemaVersion,

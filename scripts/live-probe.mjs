@@ -108,9 +108,37 @@ function toolResult(response) {
   return JSON.parse(text.text);
 }
 
+function legacySearchEnvelope(query, compact, explained) {
+  const explainedById = new Map(explained.results.map((item) => [item.id, item]));
+  return {
+    query,
+    mode: explained.mode,
+    degraded: explained.degraded ?? false,
+    timingMs: explained.timingMs,
+    results: compact.results.map((item) => {
+      const diagnostics = explainedById.get(item.id);
+      const headers = [
+        item.title ? `Title: ${item.title}` : null,
+        item.kind ? `Kind: ${item.kind}` : null,
+        item.tags?.length ? `Tags: ${item.tags.join(', ')}` : null,
+      ].filter(Boolean);
+      return {
+        ...item,
+        revisionNumber: 1,
+        currentRevisionId: item.currentRevisionId ?? item.revisionId,
+        isCurrentRevision: item.currentRevisionId === undefined,
+        excerpt: [...headers, item.excerpt].join('\n'),
+        segmentPath: diagnostics?.segmentPath,
+        relevanceScore: diagnostics?.score?.fusedScore,
+        resourceUri: `memory://spaces/${item.spaceId}/memories/${item.id}`,
+      };
+    }),
+  };
+}
+
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.0.0' },
+    { name: 'simple-memory-live-probe', version: '3.0.1' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({
@@ -145,6 +173,10 @@ async function call(client, name, args = {}) {
   const text = response.content.find((item) => item.type === 'text');
   assert(text?.text === JSON.stringify(parsed), `${name} should return minified canonical JSON`);
   assert(response.structuredContent === undefined, `${name} should not duplicate its JSON result`);
+  assert(
+    !JSON.stringify(parsed).includes('"resourceUri"'),
+    `${name} should use MCP resource links instead of JSON resourceUri fields`,
+  );
   return parsed;
 }
 
@@ -178,18 +210,18 @@ async function run() {
   const restoreTool = tools.tools.find((tool) => tool.name === 'memory_restore');
   const deleteTool = tools.tools.find((tool) => tool.name === 'memory_delete');
   assert(
-    archiveTool?.description?.includes('Reversibly') &&
-      archiveTool.description.includes('memory_delete'),
+    archiveTool?.description?.includes('recoverable information') &&
+      archiveTool.description.includes('delete only for erasure'),
     'archive description should distinguish recoverable retention from permanent deletion',
   );
   assert(
-    restoreTool?.description?.includes('active status') &&
+    restoreTool?.description?.includes('normal recall') &&
       restoreTool.description.includes('without changing its content'),
     'restore description should explain reactivation without revision changes',
   );
   assert(
-    deleteTool?.description?.includes('Permanently and irreversibly') &&
-      deleteTool.description.includes('ordinary relationships') &&
+    deleteTool?.description?.includes('Irreversibly erase') &&
+      deleteTool.description.includes('links') &&
       deleteTool.description.includes('merge redirects'),
     'delete description should disclose complete irreversible erasure',
   );
@@ -201,6 +233,11 @@ async function run() {
     description: 'Isolated end-to-end verification',
   });
   assert(space.id === 'live-probe', 'space creation');
+  assert(space.name === undefined && typeof space.createdAt === 'string', 'compact space creation');
+  const spaces = await call(client, 'space_list');
+  const listedSpace = spaces.find((item) => item.id === space.id);
+  assert(listedSpace?.name === 'Live probe', 'space list should retain identifying details');
+  assert(listedSpace?.createdAt === undefined, 'space list should omit creation timestamps');
 
   const lease = await call(client, 'memory_create', {
     spaceId: 'live-probe',
@@ -216,17 +253,23 @@ async function run() {
       {
         uri: 'urn:probe:contract-17',
         type: 'contract',
+        observedAt: '2026-01-15T12:00:00.000Z',
         metadata: { contractVersion: 17 },
       },
     ],
+    observedAt: '2026-01-15T12:00:00.000Z',
     confidence: 0.95,
     reviewAfter: '2000-01-01T00:00:00.000Z',
     idempotencyKey: 'probe-lease',
   });
   assert(lease.indexStatus === (modelsEnabled ? 'ready' : 'lexical-only'), 'expected index status');
-  const originalRecordedAt = lease.revision.recordedAt;
-  assert(lease.revision.content === undefined, 'create response should not echo submitted content');
-  assert(lease.revision.contentHash === undefined, 'create response should hide internal hash');
+  const originalRecordedAt = lease.recordedAt;
+  assert(typeof lease.revisionId === 'string', 'create response should identify the revision');
+  assert(lease.revision === undefined, 'create response should not duplicate revision details');
+  assert(
+    lease.currentRevisionId === undefined,
+    'create response should not duplicate current revision',
+  );
 
   const preference = await call(client, 'memory_create', {
     spaceId: 'live-probe',
@@ -249,7 +292,23 @@ async function run() {
       },
     },
     tags: ['procurement', 'cold-chain'],
+    observedAt: '2026-02-01T09:00:00.000Z',
+    sources: [
+      {
+        uri: 'urn:probe:northline-rate',
+        type: 'rate-card',
+        observedAt: '2026-02-01T09:00:00.000Z',
+        metadata: { version: 4 },
+      },
+    ],
   });
+  const structuredRateDetail = await call(client, 'memory_get', { memoryId: structuredRate.id });
+  assert(
+    structuredRateDetail.revision.observedAt === '2026-02-01T09:00:00.000Z' &&
+      structuredRateDetail.revision.sources[0].observedAt === undefined &&
+      structuredRateDetail.revision.sources[0].metadata.version === 4,
+    'direct reads should keep provenance while omitting duplicate source observation time',
+  );
 
   const duplicate = await call(client, 'memory_create', {
     spaceId: 'live-probe',
@@ -265,19 +324,28 @@ async function run() {
     mode: 'lexical',
   });
   assert(lexical.results[0]?.id === lease.id, 'lexical search should retrieve the lease');
-  assert(typeof lexical.results[0]?.relevanceScore === 'number', 'compact relevance score');
+  assert(lexical.query === undefined && lexical.timingMs === undefined, 'ordinary search metadata');
+  assert(lexical.degraded === undefined, 'healthy search should omit degraded false');
+  assert(lexical.results[0]?.relevanceScore === undefined, 'duplicate relevance score is omitted');
   assert(lexical.results[0]?.score === undefined, 'rank diagnostics should be opt-in');
+  assert(lexical.results[0]?.segmentPath === undefined, 'segment diagnostics should be opt-in');
   assert(
     lexical.results[0]?.sources?.[0]?.metadata === undefined,
     'source metadata should be opt-in',
   );
   assert(
-    lexical.results[0]?.revisionId === lease.currentRevisionId,
+    lexical.results[0]?.observedAt === '2026-01-15T12:00:00.000Z' &&
+      lexical.results[0]?.sources?.[0]?.observedAt === undefined,
+    'source observation time should not duplicate the memory observation time',
+  );
+  assert(
+    lexical.results[0]?.revisionId === lease.revisionId,
     'search result should identify the returned revision',
   );
   assert(
-    lexical.results[0]?.isCurrentRevision === true,
-    'current search result should identify itself as current',
+    lexical.results[0]?.currentRevisionId === undefined &&
+      lexical.results[0]?.isCurrentRevision === undefined,
+    'current search result should omit current-revision duplication',
   );
   assert(
     lexical.results[0]?.reviewAfter === '2000-01-01T00:00:00.000Z',
@@ -295,12 +363,28 @@ async function run() {
     'structured rate search should retrieve the correct memory',
   );
   assert(
-    structuredRateSearch.results[0]?.segmentPath === '$/price/basis',
-    'structured rate probe should exercise a narrow matched field',
+    !structuredRateSearch.results[0]?.excerpt.startsWith('Title:'),
+    'search excerpts should omit duplicate structured headers',
   );
   assert(
     structuredRateSearch.results[0]?.excerpt.includes('$/price/amount: 18.25'),
     'narrow field match should include answer-bearing sibling context',
+  );
+  const explainedStructuredRateSearch = await call(client, 'memory_search', {
+    query: 'temperature-controlled pallet',
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+    explain: true,
+  });
+  assert(
+    explainedStructuredRateSearch.results[0]?.segmentPath === '$/price/basis',
+    'explained search should expose the matched field',
+  );
+  assert(
+    typeof explainedStructuredRateSearch.results[0]?.score?.fusedScore === 'number' &&
+      typeof explainedStructuredRateSearch.timingMs === 'number' &&
+      explainedStructuredRateSearch.mode === 'lexical',
+    'explained search should expose ranking diagnostics',
   );
 
   const highConfidence = await call(client, 'memory_search', {
@@ -406,6 +490,10 @@ async function run() {
   });
   assert(firstPage.items.length === 1, 'memory list page size');
   assert(firstPage.items[0].content === undefined, 'memory list should return summaries');
+  assert(
+    firstPage.items[0].state === undefined && firstPage.items[0].revisionNumber === undefined,
+    'memory list should omit request-fixed state and revision number',
+  );
   assert(typeof firstPage.nextCursor === 'string', 'memory list should return an opaque cursor');
   const secondPage = await call(client, 'memory_list', {
     spaceId: 'live-probe',
@@ -421,7 +509,10 @@ async function run() {
       spaceIds: ['live-probe'],
       mode: 'quality',
     });
-    assert(!semantic.degraded, 'quality search should have both Qwen models available');
+    assert(
+      semantic.degraded === undefined,
+      'quality search should have both Qwen models available',
+    );
     assert(semantic.results[0]?.id === lease.id, 'semantic paraphrase should retrieve the lease');
 
     const lithuanian = await call(client, 'memory_search', {
@@ -446,7 +537,7 @@ async function run() {
   await new Promise((resolve) => setTimeout(resolve, 20));
   const revised = await call(client, 'memory_revise', {
     memoryId: lease.id,
-    expectedRevisionId: lease.currentRevisionId,
+    expectedRevisionId: lease.revisionId,
     spaceId: 'live-probe',
     title: 'Warehouse lease renewal',
     kind: 'agreement',
@@ -459,11 +550,12 @@ async function run() {
     sources: [{ uri: 'urn:probe:amendment-2', type: 'contract-amendment' }],
     reviewAfter: '2999-01-01T00:00:00.000Z',
   });
-  assert(revised.revision.revisionNumber === 2, 'revision number must advance');
+  assert(revised.revisionId !== lease.revisionId, 'revision identifier must advance');
+  assert(revised.revision === undefined, 'revision acknowledgement should remain compact');
 
   await expectToolError(client, 'memory_revise', {
     memoryId: lease.id,
-    expectedRevisionId: lease.currentRevisionId,
+    expectedRevisionId: lease.revisionId,
     spaceId: 'live-probe',
     title: 'Stale concurrent update',
     content: 'This write must not be accepted.',
@@ -471,6 +563,7 @@ async function run() {
 
   const history = await call(client, 'memory_history', { memoryId: lease.id });
   assert(history.revisions.length === 2, 'append-only history should retain both revisions');
+  assert(history.memoryId === undefined, 'history should not echo the requested memory ID');
   assert(history.revisions[0]?.content === undefined, 'history content should be opt-in');
   assert(history.revisions[0]?.contentHash === undefined, 'history should hide internal hashes');
   assert(history.revisions[0]?.reviewDue === undefined, 'future review should not warn');
@@ -489,7 +582,7 @@ async function run() {
     cursor: detailedHistory.nextCursor,
   });
   assert(olderHistory.revisions[0]?.revisionNumber === 1, 'history second page');
-  assert(olderHistory.nextCursor === null, 'history final page');
+  assert(olderHistory.nextCursor === undefined, 'history final page should omit an empty cursor');
   const historical = await call(client, 'memory_get', {
     memoryId: lease.id,
     atTime: originalRecordedAt,
@@ -501,6 +594,10 @@ async function run() {
     'internal search projection must be hidden',
   );
   assert(historical.revision.contentHash === undefined, 'memory_get should hide internal hash');
+  assert(
+    historical.currentRevisionId === revised.revisionId,
+    'historical reads should identify the current revision',
+  );
   const historicalSearch = await call(client, 'memory_search', {
     query: 'December 2030',
     spaceIds: ['live-probe'],
@@ -510,6 +607,10 @@ async function run() {
   assert(
     historicalSearch.results[0]?.id === lease.id,
     'historical search should retrieve the revision valid at the requested record time',
+  );
+  assert(
+    historicalSearch.results[0]?.currentRevisionId === revised.revisionId,
+    'historical search should identify the current revision',
   );
   const currentOldTerm = await call(client, 'memory_search', {
     query: 'December 2030',
@@ -549,6 +650,31 @@ async function run() {
     traversal.items.some((entry) => entry.memory.id === preference.id),
     'graph traversal',
   );
+  assert(
+    traversal.query === undefined && traversal.items.every((entry) => entry.via === undefined),
+    'compact traversal should omit echoed query and duplicated via links',
+  );
+  const rankedTraversal = await call(client, 'memory_traverse', {
+    memoryId: lease.id,
+    maxDepth: 2,
+    query: 'quiet nature hotel',
+  });
+  assert(
+    rankedTraversal.items.every(
+      (entry) => entry.relevanceScore === undefined && entry.rerankerScore === undefined,
+    ),
+    'traversal ranking diagnostics should be opt-in',
+  );
+  const explainedTraversal = await call(client, 'memory_traverse', {
+    memoryId: lease.id,
+    maxDepth: 2,
+    query: 'quiet nature hotel',
+    explain: true,
+  });
+  assert(
+    explainedTraversal.items.some((entry) => typeof entry.relevanceScore === 'number'),
+    'explained traversal should expose ranking diagnostics',
+  );
   const verifiedFeedback = await call(client, 'memory_feedback', {
     memoryId: lease.id,
     scope: 'content',
@@ -557,10 +683,14 @@ async function run() {
     note: 'Verified by live MCP probe',
     idempotencyKey: 'live-probe-verified-feedback',
   });
-  assert(verifiedFeedback.revisionId === revised.revision.id, 'feedback should target revision');
+  assert(verifiedFeedback.revisionId === revised.revisionId, 'feedback should target revision');
+  assert(
+    verifiedFeedback.signal === undefined && verifiedFeedback.actorType === undefined,
+    'feedback acknowledgement should not echo submitted values',
+  );
   const feedbackRead = await call(client, 'memory_feedback_list', {
     memoryId: lease.id,
-    revisionId: revised.revision.id,
+    revisionId: revised.revisionId,
     includeDetails: true,
   });
   assert(feedbackRead.items[0]?.signal === 'verified', 'feedback should be readable');
@@ -583,11 +713,17 @@ async function run() {
     metadata: { test: true },
     idempotencyKey: 'feedback-probe-concern',
   });
-  assert(concern.revisionId === feedbackFixture.revision.id, 'content feedback current revision');
+  assert(concern.revisionId === feedbackFixture.revisionId, 'content feedback current revision');
   const concerned = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
   assert(
     concerned.feedbackSummary.feedbackStatus === 'needs-review',
     'incorrect feedback should require review',
+  );
+  assert(
+    concerned.currentRevisionId === undefined &&
+      concerned.feedbackSummary.revisionId === undefined &&
+      concerned.feedbackSummary.retrievalEventCount === undefined,
+    'current memory reads should omit duplicate revision and zero feedback counts',
   );
   const beforeConcernRead = await call(client, 'memory_get', {
     memoryId: feedbackFixture.id,
@@ -597,9 +733,14 @@ async function run() {
     beforeConcernRead.feedbackSummary.feedbackStatus === 'unreviewed',
     'historical read must exclude future feedback',
   );
+  assert(
+    beforeConcernRead.feedbackSummary.contentEventCount === undefined &&
+      beforeConcernRead.feedbackSummary.retrievalEventCount === undefined,
+    'zero historical feedback counts should be omitted',
+  );
   const feedbackRevision = await call(client, 'memory_revise', {
     memoryId: feedbackFixture.id,
-    expectedRevisionId: feedbackFixture.revision.id,
+    expectedRevisionId: feedbackFixture.revisionId,
     title: 'Revision-aware feedback fixture',
     kind: 'feedback-probe',
     content: { marker: 'revision-aware-feedback-probe', version: 2 },
@@ -616,7 +757,7 @@ async function run() {
   });
   assert(retriedConcern.id === concern.id, 'feedback retry should return original event');
   assert(
-    retriedConcern.revisionId === feedbackFixture.revision.id,
+    retriedConcern.revisionId === feedbackFixture.revisionId,
     'feedback retry should retain original revision',
   );
   await expectToolError(client, 'memory_feedback', {
@@ -628,7 +769,7 @@ async function run() {
   });
   const cleanRevision = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
   assert(
-    cleanRevision.revision.id === feedbackRevision.revision.id &&
+    cleanRevision.revision.id === feedbackRevision.revisionId &&
       cleanRevision.feedbackSummary.feedbackStatus === 'unreviewed',
     'new revision should not inherit old feedback',
   );
@@ -641,7 +782,7 @@ async function run() {
   });
   await expectToolError(client, 'memory_feedback', {
     memoryId: feedbackFixture.id,
-    revisionId: feedbackRevision.revision.id,
+    revisionId: feedbackRevision.revisionId,
     scope: 'retrieval',
     signal: 'relevant',
     actorType: 'agent',
@@ -650,10 +791,11 @@ async function run() {
     query: 'revision-aware-feedback-probe',
     spaceIds: ['live-probe'],
     mode: 'lexical',
+    explain: true,
   });
   await call(client, 'memory_feedback', {
     memoryId: feedbackFixture.id,
-    revisionId: feedbackRevision.revision.id,
+    revisionId: feedbackRevision.revisionId,
     scope: 'retrieval',
     signal: 'relevant',
     actorType: 'agent',
@@ -663,24 +805,73 @@ async function run() {
     query: 'revision-aware-feedback-probe',
     spaceIds: ['live-probe'],
     mode: 'lexical',
+    explain: true,
   });
   assert(
-    JSON.stringify(beforeRetrievalFeedback.results.map((item) => [item.id, item.relevanceScore])) ===
-      JSON.stringify(afterRetrievalFeedback.results.map((item) => [item.id, item.relevanceScore])),
+    JSON.stringify(beforeRetrievalFeedback.results.map((item) => [item.id, item.score])) ===
+      JSON.stringify(afterRetrievalFeedback.results.map((item) => [item.id, item.score])),
     'retrieval feedback must not change ranking',
   );
   await call(client, 'memory_feedback', {
     memoryId: feedbackFixture.id,
-    revisionId: feedbackRevision.revision.id,
+    revisionId: feedbackRevision.revisionId,
     scope: 'content',
     signal: 'verified',
     actorType: 'external',
   });
+  const canonicalMergeFixture = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    logicalKey: 'payload-merge-canonical',
+    title: 'Canonical merge fixture',
+    content: { marker: 'canonical-merge-fixture' },
+  });
+  const duplicateMergeFixture = await call(client, 'memory_create', {
+    spaceId: 'live-probe',
+    logicalKey: 'payload-merge-duplicate',
+    title: 'Duplicate merge fixture',
+    content: { marker: 'duplicate-merge-fixture' },
+  });
+  const merge = await call(client, 'memory_merge', {
+    canonicalMemoryId: canonicalMergeFixture.id,
+    expectedCanonicalRevisionId: canonicalMergeFixture.revisionId,
+    duplicates: [
+      {
+        memoryId: duplicateMergeFixture.id,
+        expectedRevisionId: duplicateMergeFixture.revisionId,
+      },
+    ],
+    actorId: 'live-probe',
+    reason: 'Payload acknowledgement verification',
+  });
+  assert(
+    merge.canonicalMemoryId === canonicalMergeFixture.id &&
+      merge.canonicalRevisionId === canonicalMergeFixture.revisionId &&
+      merge.mergedMemoryIds[0] === duplicateMergeFixture.id,
+    'merge acknowledgement should retain workflow identifiers',
+  );
+  assert(
+    merge.actorId === undefined &&
+      merge.reason === undefined &&
+      merge.redirectedMemoryCount === undefined,
+    'merge acknowledgement should omit echoes and redundant counts',
+  );
+  const redirectedByKey = await call(client, 'memory_get_by_key', {
+    spaceId: 'live-probe',
+    logicalKey: 'payload-merge-duplicate',
+  });
+  assert(
+    redirectedByKey.redirectedFromMemoryId === duplicateMergeFixture.id &&
+      redirectedByKey.memory.id === canonicalMergeFixture.id &&
+      redirectedByKey.logicalKey === undefined &&
+      redirectedByKey.matchedMemoryId === undefined &&
+      redirectedByKey.redirected === undefined,
+    'logical-key retrieval should report only a meaningful redirect',
+  );
   const verifiedFixture = await call(client, 'memory_get', { memoryId: feedbackFixture.id });
   assert(verifiedFixture.feedbackSummary.feedbackStatus === 'verified', 'verified status');
   await call(client, 'memory_feedback', {
     memoryId: feedbackFixture.id,
-    revisionId: feedbackRevision.revision.id,
+    revisionId: feedbackRevision.revisionId,
     scope: 'content',
     signal: 'correct',
     actorType: 'agent',
@@ -689,7 +880,7 @@ async function run() {
   assert(supportedFixture.feedbackSummary.feedbackStatus === 'supported', 'latest correct status');
   await call(client, 'memory_feedback', {
     memoryId: feedbackFixture.id,
-    revisionId: feedbackRevision.revision.id,
+    revisionId: feedbackRevision.revisionId,
     scope: 'content',
     signal: 'stale',
     actorType: 'agent',
@@ -702,7 +893,10 @@ async function run() {
   });
   assert(compactFeedback.nextCursor, 'feedback history should paginate');
   assert(
-    compactFeedback.items.every((item) => item.note === undefined && item.metadata === undefined),
+    compactFeedback.items.every(
+      (item) =>
+        item.memoryId === undefined && item.note === undefined && item.metadata === undefined,
+    ),
     'feedback history should be compact by default',
   );
   const detailedFeedback = await call(client, 'memory_feedback_list', {
@@ -726,6 +920,35 @@ async function run() {
     signal: 'contradicted',
     actorType: 'external',
   });
+  const payloadQuery = 'feedback-probe';
+  const compactPayloadSearch = await call(client, 'memory_search', {
+    query: payloadQuery,
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+    topK: 2,
+  });
+  const explainedPayloadSearch = await call(client, 'memory_search', {
+    query: payloadQuery,
+    spaceIds: ['live-probe'],
+    mode: 'lexical',
+    topK: 2,
+    explain: true,
+  });
+  assert(compactPayloadSearch.results.length === 2, 'payload fixture should return two results');
+  assert(
+    JSON.stringify(compactPayloadSearch.results.map((item) => item.id)) ===
+      JSON.stringify(explainedPayloadSearch.results.map((item) => item.id)),
+    'explain must not change candidate selection or ordering',
+  );
+  const legacyPayload = legacySearchEnvelope(
+    payloadQuery,
+    compactPayloadSearch,
+    explainedPayloadSearch,
+  );
+  assert(
+    JSON.stringify(compactPayloadSearch).length <= JSON.stringify(legacyPayload).length * 0.8,
+    'two-result compact search should reduce the legacy-equivalent payload by at least 20%',
+  );
   const reviewPageOne = await call(client, 'memory_list', {
     spaceId: 'live-probe',
     feedbackStatus: 'needs-review',
@@ -758,6 +981,30 @@ async function run() {
   assert(
     !JSON.stringify(resource.contents).includes('contentHash'),
     'memory resource must hide internal content hash',
+  );
+  const provenanceResource = await client.readResource({
+    uri: `memory://spaces/live-probe/memories/${structuredRate.id}`,
+  });
+  const resourceMemory = JSON.parse(provenanceResource.contents[0].text);
+  assert(
+    resourceMemory.revision.sources[0].observedAt === '2026-02-01T09:00:00.000Z',
+    'canonical resources should retain the complete source representation',
+  );
+
+  const compactStatus = await call(client, 'memory_status', {});
+  assert(
+    Number.isInteger(compactStatus.schemaVersion) && compactStatus.schemaVersion > 0,
+    'compact status should expose the schema version',
+  );
+  assert(compactStatus.database === undefined, 'compact status should hide storage diagnostics');
+  assert(
+    compactStatus.modelLauncherPid === undefined,
+    'compact status should hide process diagnostics',
+  );
+  const detailedStatus = await call(client, 'memory_status', { includeDetails: true });
+  assert(
+    typeof detailedStatus.database === 'string',
+    'detailed status should expose storage diagnostics',
   );
 
   const status = await call(client, 'memory_status', { probeModels: modelsEnabled });
@@ -812,7 +1059,7 @@ async function run() {
   const beforeArchive = await call(client, 'memory_search', {
     query: 'KelioniÅ³ pageidavimas',
     spaceIds: ['live-probe'],
-    atTime: preference.revision.recordedAt,
+    atTime: preference.recordedAt,
     mode: 'lexical',
   });
   assert(
@@ -825,7 +1072,7 @@ async function run() {
   );
   const historicalPreference = await call(client, 'memory_get', {
     memoryId: preference.id,
-    atTime: preference.revision.recordedAt,
+    atTime: preference.recordedAt,
   });
   assert(
     historicalPreference.state === 'active',
@@ -877,7 +1124,7 @@ async function run() {
   inspectionDatabase.close();
   assert(disposableSegmentIds.length > 0, 'deletion fixture should have indexed segments');
   if (!modelsEnabled) seedDeletionProbeVector(disposableSegmentIds[0]);
-  const deletionRevisionIds = [disposable.revision.id];
+  const deletionRevisionIds = [disposable.revisionId];
   const rowsBeforeDeletion = deletionRowCounts(
     disposable.id,
     deletionRevisionIds,
@@ -932,6 +1179,8 @@ async function run() {
       historySummary: JSON.stringify(history).length,
       detailedHistoryPage: JSON.stringify(detailedHistory).length,
       fullHistoricalGet: JSON.stringify(historical).length,
+      twoResultSearch: JSON.stringify(compactPayloadSearch).length,
+      legacyEquivalentTwoResultSearch: JSON.stringify(legacyPayload).length,
     },
     dataDir,
   };

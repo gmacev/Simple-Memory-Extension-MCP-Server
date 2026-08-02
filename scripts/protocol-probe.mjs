@@ -100,7 +100,7 @@ async function stop(child) {
 
 function client(name, mode) {
   return new Client(
-    { name, version: '3.0.0' },
+    { name, version: '3.0.1' },
     { versionNegotiation: { mode, probe: { timeoutMs: 5_000 } } },
   );
 }
@@ -168,7 +168,7 @@ async function probeConcurrency(dataDir) {
     const contested = await createMemory('contested', 'contested');
     const revisionArguments = (marker) => ({
       memoryId: contested.id,
-      expectedRevisionId: contested.currentRevisionId,
+      expectedRevisionId: contested.revisionId,
       spaceId: space.id,
       title: marker,
       kind: 'protocol-probe',
@@ -202,7 +202,7 @@ async function probeConcurrency(dataDir) {
         name: 'memory_revise',
         arguments: {
           memoryId: independentA.id,
-          expectedRevisionId: independentA.currentRevisionId,
+          expectedRevisionId: independentA.revisionId,
           spaceId: space.id,
           title: 'independent-a-updated',
           kind: 'protocol-probe',
@@ -213,7 +213,7 @@ async function probeConcurrency(dataDir) {
         name: 'memory_revise',
         arguments: {
           memoryId: independentB.id,
-          expectedRevisionId: independentB.currentRevisionId,
+          expectedRevisionId: independentB.revisionId,
           spaceId: space.id,
           title: 'independent-b-updated',
           kind: 'protocol-probe',
@@ -265,7 +265,7 @@ function modernBody(id, method, params = {}, version = protocolVersion) {
       ...params,
       _meta: {
         'io.modelcontextprotocol/protocolVersion': version,
-        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.0.0' },
+        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.0.1' },
         'io.modelcontextprotocol/clientCapabilities': {},
       },
     },

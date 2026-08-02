@@ -143,6 +143,8 @@ Add this to `~/.gemini/config/mcp_config.json`:
 | `memory_feedback_list` | Read compact or detailed feedback history. |
 | `memory_status` | Inspect storage, indexing, and model health. |
 
+List and search results are compact by default; use `memory_get`, `includeContent`, `includeDetails`, `includeSourceMetadata`, or `explain` when fuller context or diagnostics are needed.
+
 Agents can also read complete memories and revision histories through MCP resources.
 
 ## Environment variables

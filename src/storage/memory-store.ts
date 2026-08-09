@@ -90,6 +90,9 @@ const contentFeedbackSignals = [
   'contradicted',
 ] as const;
 const retrievalFeedbackSignals = ['relevant', 'irrelevant', 'helpful', 'not_helpful'] as const;
+const VECTOR_UNBOUNDED_FUTURE = '9999-12-31T23:59:59.999Z';
+const CURRENT_VECTOR_INITIAL_K = 100;
+const CURRENT_VECTOR_MAX_K = 2_000;
 const contentFeedbackSignalSchema = z.enum(contentFeedbackSignals);
 const retrievalFeedbackSignalSchema = z.enum(retrievalFeedbackSignals);
 const feedbackScopeSchema = z.enum(['content', 'retrieval']);
@@ -208,6 +211,12 @@ function escapeLike(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
+function ftsPrefixQuery(value: string): string | null {
+  const terms = [...new Set(value.match(/[\p{L}\p{N}_]+/gu) ?? [])];
+  if (terms.length === 0) return null;
+  return terms.map((term) => `"${term.replaceAll('"', '""')}"*`).join(' AND ');
+}
+
 function normalizeLogicalKey(logicalKey: string | undefined): string | null {
   const normalized = logicalKey?.normalize('NFKC').trim();
   return normalized ? normalized : null;
@@ -314,6 +323,67 @@ export class MemoryStore {
           model_profile_id TEXT PARTITION KEY
         )`,
       );
+      let initializedCurrentVectors = false;
+      const initializeCurrentVectors = this.database.transaction(() => {
+        const currentVectorTableExists =
+          this.database
+            .prepare(
+              "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_current_vectors'",
+            )
+            .get() !== undefined;
+        this.database.exec(
+          `CREATE VIRTUAL TABLE IF NOT EXISTS memory_current_vectors USING vec0(
+              segment_id TEXT PRIMARY KEY,
+              embedding float[${config.embeddingDimension}],
+              model_profile_id TEXT PARTITION KEY,
+              memory_id TEXT,
+              space_id TEXT,
+              memory_state TEXT,
+              space_state TEXT,
+              kind TEXT,
+              confidence FLOAT,
+              salience FLOAT,
+              valid_from TEXT,
+              valid_to TEXT,
+              expires_at TEXT,
+              recorded_at TEXT
+            )`,
+        );
+        if (!currentVectorTableExists) {
+          this.database.exec(
+            `INSERT INTO memory_current_vectors(
+               segment_id, embedding, model_profile_id, memory_id, space_id,
+               memory_state, space_state, kind, confidence, salience,
+               valid_from, valid_to, expires_at, recorded_at
+             )
+             SELECT vector.segment_id,
+                    vector.embedding,
+                    vector.model_profile_id,
+                    memory.id,
+                    memory.space_id,
+                    memory.state,
+                    CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
+                    COALESCE(revision.kind, ''),
+                    COALESCE(revision.confidence, -1.0),
+                    COALESCE(revision.salience, -1.0),
+                    COALESCE(revision.valid_from, ''),
+                    COALESCE(revision.valid_to, '${VECTOR_UNBOUNDED_FUTURE}'),
+                    COALESCE(revision.expires_at, '${VECTOR_UNBOUNDED_FUTURE}'),
+                    revision.recorded_at
+             FROM memory_vectors vector
+             JOIN memory_segments segment ON segment.id = vector.segment_id
+             JOIN memories memory ON memory.id = segment.memory_id
+             JOIN memory_revisions revision ON revision.id = segment.revision_id
+             JOIN spaces space ON space.id = memory.space_id
+             WHERE memory.current_revision_id = segment.revision_id`,
+          );
+          initializedCurrentVectors = true;
+        }
+      });
+      initializeCurrentVectors.immediate();
+      if (initializedCurrentVectors) {
+        this.logger.info('Initialized current-revision vector index');
+      }
       vectorAvailable = true;
     }
     this.vectorAvailable = vectorAvailable;
@@ -414,21 +484,29 @@ export class MemoryStore {
     if (normalizedQuery) {
       const escaped = escapeLike(normalizedQuery);
       const prefix = `${escaped}%`;
-      const contains = `%${escaped}%`;
+      const ftsQuery = ftsPrefixQuery(normalizedQuery);
       rankSql = `CASE
-        WHEN lower(id) = ? THEN 0
-        WHEN lower(name) = ? THEN 1
-        WHEN lower(id) LIKE ? ESCAPE '\\' THEN 2
-        WHEN lower(name) LIKE ? ESCAPE '\\' THEN 3
+        WHEN id = ? COLLATE NOCASE THEN 0
+        WHEN name = ? COLLATE NOCASE THEN 1
+        WHEN id COLLATE NOCASE LIKE ? ESCAPE '\\' THEN 2
+        WHEN name COLLATE NOCASE LIKE ? ESCAPE '\\' THEN 3
         ELSE 4
       END`;
       rankParameters.push(normalizedQuery, normalizedQuery, prefix, prefix);
       clauses.push(`(
-        lower(id) LIKE ? ESCAPE '\\'
-        OR lower(name) LIKE ? ESCAPE '\\'
-        OR lower(COALESCE(description, '')) LIKE ? ESCAPE '\\'
+        id = ? COLLATE NOCASE
+        OR name = ? COLLATE NOCASE
+        OR id COLLATE NOCASE LIKE ? ESCAPE '\\'
+        OR name COLLATE NOCASE LIKE ? ESCAPE '\\'
+        ${ftsQuery ? 'OR id IN (SELECT space_id FROM space_fts WHERE space_fts MATCH ?)' : ''}
       )`);
-      parameters.push(contains, contains, contains);
+      parameters.push(
+        normalizedQuery,
+        normalizedQuery,
+        prefix,
+        prefix,
+        ...(ftsQuery ? [ftsQuery] : []),
+      );
     }
 
     const fingerprint = spaceListFingerprint(filters);
@@ -496,9 +574,13 @@ export class MemoryStore {
     const existing = this.getRow('SELECT * FROM spaces WHERE id = ?', spaceId);
     if (!existing) throw new Error(`Memory space not found: ${spaceId}`);
     if (existing.deleted_at !== null) return this.spaceFromRow(existing);
-    this.database
-      .prepare('UPDATE spaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
-      .run(now(), spaceId);
+    const remove = this.database.transaction(() => {
+      this.database
+        .prepare('UPDATE spaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+        .run(now(), spaceId);
+      this.refreshCurrentVectorsForSpace(spaceId);
+    });
+    remove.immediate();
     return this.spaceFromRow(this.requireRow('SELECT * FROM spaces WHERE id = ?', spaceId));
   }
 
@@ -506,10 +588,60 @@ export class MemoryStore {
     const existing = this.getRow('SELECT * FROM spaces WHERE id = ?', spaceId);
     if (!existing) throw new Error(`Memory space not found: ${spaceId}`);
     if (existing.deleted_at === null) return this.spaceFromRow(existing);
-    this.database
-      .prepare('UPDATE spaces SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL')
-      .run(spaceId);
+    const restore = this.database.transaction(() => {
+      this.database
+        .prepare('UPDATE spaces SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL')
+        .run(spaceId);
+      this.refreshCurrentVectorsForSpace(spaceId);
+    });
+    restore.immediate();
     return this.spaceFromRow(this.requireRow('SELECT * FROM spaces WHERE id = ?', spaceId));
+  }
+
+  private refreshCurrentVectorsForSpace(spaceId: string): void {
+    if (!this.vectorAvailable) return;
+    this.refreshCurrentVectors('memory.space_id = ?', spaceId);
+  }
+
+  private refreshCurrentVectorsForMemory(memoryId: string): void {
+    if (!this.vectorAvailable) return;
+    this.refreshCurrentVectors('memory.id = ?', memoryId);
+  }
+
+  private refreshCurrentVectors(where: 'memory.id = ?' | 'memory.space_id = ?', value: string): void {
+    const deleteColumn = where === 'memory.id = ?' ? 'memory_id' : 'space_id';
+    this.database.prepare(`DELETE FROM memory_current_vectors WHERE ${deleteColumn} = ?`).run(value);
+    this.database
+      .prepare(
+        `INSERT INTO memory_current_vectors(
+             segment_id, embedding, model_profile_id, memory_id, space_id,
+             memory_state, space_state, kind, confidence, salience,
+             valid_from, valid_to, expires_at, recorded_at
+           )
+           SELECT vector.segment_id,
+                  vector.embedding,
+                  vector.model_profile_id,
+                  memory.id,
+                  memory.space_id,
+                  memory.state,
+                  CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
+                  COALESCE(revision.kind, ''),
+                  COALESCE(revision.confidence, -1),
+                  COALESCE(revision.salience, -1),
+                  COALESCE(revision.valid_from, ''),
+                  COALESCE(revision.valid_to, ?),
+                  COALESCE(revision.expires_at, ?),
+                  revision.recorded_at
+           FROM memory_vectors vector
+           JOIN memory_segments segment ON segment.id = vector.segment_id
+           JOIN memories memory
+             ON memory.id = segment.memory_id
+            AND memory.current_revision_id = segment.revision_id
+           JOIN memory_revisions revision ON revision.id = segment.revision_id
+           JOIN spaces space ON space.id = memory.space_id
+           WHERE ${where}`,
+      )
+      .run(VECTOR_UNBOUNDED_FUTURE, VECTOR_UNBOUNDED_FUTURE, value);
   }
 
   private assertSpace(spaceId: string): void {
@@ -1642,8 +1774,9 @@ export class MemoryStore {
            FROM memory_state_events WHERE memory_id = ?`,
         )
         .run(randomUUID(), memoryId, state, timestamp, memoryId);
+      this.refreshCurrentVectorsForMemory(memoryId);
     });
-    transaction();
+    transaction.immediate();
     return this.getMemory(memoryId);
   }
 
@@ -1686,7 +1819,13 @@ export class MemoryStore {
         const removeVector = this.database.prepare(
           'DELETE FROM memory_vectors WHERE segment_id = ?',
         );
-        for (const segmentId of priorSegmentIds) removeVector.run(segmentId);
+        const removeCurrentVector = this.database.prepare(
+          'DELETE FROM memory_current_vectors WHERE segment_id = ?',
+        );
+        for (const segmentId of priorSegmentIds) {
+          removeVector.run(segmentId);
+          removeCurrentVector.run(segmentId);
+        }
       }
       this.database.prepare('DELETE FROM memory_fts WHERE revision_id = ?').run(revisionId);
       this.database.prepare('DELETE FROM memory_segments WHERE revision_id = ?').run(revisionId);
@@ -1734,6 +1873,9 @@ export class MemoryStore {
     if (segments.length !== vectors.length) throw new Error('Segment/vector count mismatch');
     const transaction = this.database.transaction(() => {
       const remove = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+      const removeCurrent = this.database.prepare(
+        'DELETE FROM memory_current_vectors WHERE segment_id = ?',
+      );
       const segmentExists = this.database.prepare(
         'SELECT 1 FROM memory_segments WHERE id = ? AND revision_id = ?',
       );
@@ -1741,9 +1883,42 @@ export class MemoryStore {
         `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
          VALUES (?, ?, ?)`,
       );
+      const insertCurrent = this.database.prepare(
+        `INSERT INTO memory_current_vectors(
+           segment_id, embedding, model_profile_id, memory_id, space_id,
+           memory_state, space_state, kind, confidence, salience,
+           valid_from, valid_to, expires_at, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
       const markProfile = this.database.prepare(
         'UPDATE memory_segments SET model_profile_id = ? WHERE id = ?',
       );
+      const firstSegment = segments[0];
+      if (!firstSegment) return;
+      const current = this.requireRow(
+        `SELECT memory.id AS memory_id,
+                memory.current_revision_id,
+                memory.state AS memory_state,
+                memory.space_id,
+                CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END AS space_state,
+                revision.kind,
+                revision.confidence,
+                revision.salience,
+                revision.valid_from,
+                revision.valid_to,
+                revision.expires_at,
+                revision.recorded_at
+         FROM memories memory
+         JOIN memory_revisions revision ON revision.id = ? AND revision.memory_id = memory.id
+         JOIN spaces space ON space.id = memory.space_id`,
+        firstSegment.revisionId,
+      );
+      const isCurrentRevision = String(current.current_revision_id) === firstSegment.revisionId;
+      if (isCurrentRevision) {
+        this.database
+          .prepare('DELETE FROM memory_current_vectors WHERE memory_id = ?')
+          .run(current.memory_id);
+      }
       for (let index = 0; index < segments.length; index += 1) {
         const segment = segments[index];
         const vector = vectors[index];
@@ -1752,7 +1927,26 @@ export class MemoryStore {
           throw new Error('Memory revision was deleted while semantic indexing was running');
         }
         remove.run(segment.id);
+        removeCurrent.run(segment.id);
         insert.run(segment.id, Buffer.from(new Float32Array(vector).buffer), modelProfileId);
+        if (isCurrentRevision) {
+          insertCurrent.run(
+            segment.id,
+            Buffer.from(new Float32Array(vector).buffer),
+            modelProfileId,
+            current.memory_id,
+            current.space_id,
+            current.memory_state,
+            current.space_state,
+            optionalString(current.kind) ?? '',
+            optionalNumber(current.confidence) ?? -1,
+            optionalNumber(current.salience) ?? -1,
+            optionalString(current.valid_from) ?? '',
+            optionalString(current.valid_to) ?? VECTOR_UNBOUNDED_FUTURE,
+            optionalString(current.expires_at) ?? VECTOR_UNBOUNDED_FUTURE,
+            current.recorded_at,
+          );
+        }
         markProfile.run(modelProfileId, segment.id);
       }
     });
@@ -1869,40 +2063,49 @@ export class MemoryStore {
   public exactCandidates(query: string, filters: CandidateFilters, limit: number): RankedSegment[] {
     const normalized = query.normalize('NFKC').trim();
     if (!normalized) return [];
-    const escaped = normalized
-      .replaceAll('\\', '\\\\')
-      .replaceAll('%', '\\%')
-      .replaceAll('_', '\\_');
     const candidates = this.candidateClauses(filters);
     const rows = this.allRows(
-      `SELECT s.id AS segment_id, s.memory_id, s.revision_id, s.text, s.path,
-              CASE
-                WHEN m.logical_key = ? THEN 0
-                WHEN m.id = ? THEN 1
-                WHEN lower(r.title) = lower(?) THEN 2
-                ELSE 3
-              END AS rank_value
-       FROM memories m
-       JOIN memory_revisions r ON r.memory_id = m.id
-       JOIN memory_segments s ON s.revision_id = r.id
-         AND s.ordinal = (
-           SELECT MIN(s2.ordinal) FROM memory_segments s2 WHERE s2.revision_id = r.id
+      `WITH exact_revisions AS (
+         SELECT revision.id AS revision_id, 0 AS rank_value
+         FROM memories memory
+         JOIN memory_revisions revision ON revision.memory_id = memory.id
+         WHERE memory.logical_key = ?
+         UNION ALL
+         SELECT revision.id AS revision_id, 1 AS rank_value
+         FROM memories memory
+         JOIN memory_revisions revision ON revision.memory_id = memory.id
+         WHERE memory.id = ?
+         UNION ALL
+         SELECT revision.id AS revision_id, 2 AS rank_value
+         FROM memory_revisions revision
+         WHERE revision.title = ? COLLATE NOCASE
+       ), ranked_exact AS (
+         SELECT revision_id, MIN(rank_value) AS rank_value
+         FROM exact_revisions
+         GROUP BY revision_id
+       )
+       SELECT segment.id AS segment_id,
+              segment.memory_id,
+              segment.revision_id,
+              segment.text,
+              segment.path,
+              exact.rank_value
+       FROM ranked_exact exact
+       JOIN memory_revisions r ON r.id = exact.revision_id
+       JOIN memories m ON m.id = r.memory_id
+       JOIN memory_segments segment ON segment.revision_id = r.id
+         AND segment.ordinal = (
+           SELECT MIN(first.ordinal)
+           FROM memory_segments first
+           WHERE first.revision_id = r.id
          )
-         WHERE ${candidates.sql}
-         AND (
-           m.logical_key = ? OR m.id = ? OR lower(r.title) = lower(?)
-           OR lower(r.title) LIKE lower(?) ESCAPE '\\'
-         )
-       ORDER BY rank_value, r.recorded_at DESC
+       WHERE ${candidates.sql}
+       ORDER BY exact.rank_value, r.recorded_at DESC
        LIMIT ?`,
       normalized,
       normalized,
       normalized,
       ...candidates.parameters,
-      normalized,
-      normalized,
-      normalized,
-      `%${escaped}%`,
       limit,
     );
     return rows.map((row) => ({
@@ -1954,38 +2157,130 @@ export class MemoryStore {
     modelProfileId: string,
   ): RankedSegment[] {
     if (!this.vectorAvailable) return [];
-    const broadLimit = Math.min(Math.max(limit * 5, limit), 500);
-    const nearest = this.allRows(
-      `SELECT segment_id, distance AS rank_value FROM memory_vectors
-         WHERE embedding MATCH ? AND k = ? AND model_profile_id = ? ORDER BY distance`,
-      Buffer.from(new Float32Array(vector).buffer),
-      broadLimit,
-      modelProfileId,
-    );
-    if (nearest.length === 0) return [];
-    const ids = nearest.map((row) => String(row.segment_id));
-    const distance = new Map(ids.map((id, index) => [id, Number(nearest[index]?.rank_value ?? 0)]));
-    const candidates = this.candidateClauses(filters);
-    const rows = this.allRows(
-      `SELECT s.id AS segment_id, s.memory_id, s.revision_id, s.text, s.path
-         FROM memory_segments s
-         JOIN memories m ON m.id = s.memory_id
-         JOIN memory_revisions r ON r.id = s.revision_id
-         WHERE s.id IN (${ids.map(() => '?').join(',')}) AND ${candidates.sql}`,
-      ...ids,
-      ...candidates.parameters,
-    );
-    return rows
-      .map((row) => ({
+    const vectorBlob = Buffer.from(new Float32Array(vector).buffer);
+    if (filters.atTime || (filters.tags?.length ?? 0) > 0) {
+      const candidates = this.candidateClauses(filters);
+      const table = filters.atTime ? 'memory_vectors' : 'memory_current_vectors';
+      return this.allRows(
+        `SELECT segment.id AS segment_id,
+                segment.memory_id,
+                segment.revision_id,
+                segment.text,
+                segment.path,
+                vec_distance_L2(vector.embedding, ?) AS rank_value
+         FROM ${table} vector
+         JOIN memory_segments segment ON segment.id = vector.segment_id
+         JOIN memories m ON m.id = segment.memory_id
+         JOIN memory_revisions r ON r.id = segment.revision_id
+         WHERE vector.model_profile_id = ? AND ${candidates.sql}
+         ORDER BY rank_value
+         LIMIT ?`,
+        vectorBlob,
+        modelProfileId,
+        ...candidates.parameters,
+        limit,
+      ).map((row) => ({
         segmentId: String(row.segment_id),
         memoryId: String(row.memory_id),
         revisionId: String(row.revision_id),
         text: String(row.text),
         path: String(row.path),
-        rankValue: distance.get(String(row.segment_id)) ?? Number.POSITIVE_INFINITY,
-      }))
-      .sort((left, right) => left.rankValue - right.rankValue)
-      .slice(0, limit);
+        rankValue: Number(row.rank_value),
+      }));
+    }
+
+    const states = filters.states && filters.states.length > 0 ? filters.states : ['active'];
+    const validityPoint = filters.validAt ?? now();
+    const metadataClauses = [
+      'embedding MATCH ?',
+      'k = ?',
+      'model_profile_id = ?',
+      "space_state = 'active'",
+      `memory_state IN (${states.map(() => '?').join(',')})`,
+      'valid_from <= ?',
+      'valid_to > ?',
+      'expires_at > ?',
+    ];
+    const metadataParameters: unknown[] = [
+      modelProfileId,
+      ...states,
+      validityPoint,
+      validityPoint,
+      now(),
+    ];
+    if (filters.spaceIds !== undefined) {
+      if (filters.spaceIds.length === 0) return [];
+      metadataClauses.push(`space_id IN (${filters.spaceIds.map(() => '?').join(',')})`);
+      metadataParameters.push(...filters.spaceIds);
+    }
+    if (filters.kinds && filters.kinds.length > 0) {
+      metadataClauses.push(`kind IN (${filters.kinds.map(() => '?').join(',')})`);
+      metadataParameters.push(...filters.kinds);
+    }
+    if (filters.minConfidence !== undefined) {
+      metadataClauses.push('confidence >= ?');
+      metadataParameters.push(filters.minConfidence);
+    }
+    if (filters.minSalience !== undefined) {
+      metadataClauses.push('salience >= ?');
+      metadataParameters.push(filters.minSalience);
+    }
+
+    let candidateK = Math.min(
+      Math.max(CURRENT_VECTOR_INITIAL_K, limit * 5),
+      CURRENT_VECTOR_MAX_K,
+    );
+    let nearest: Row[] = [];
+    let eligible: RankedSegment[] = [];
+    while (true) {
+      nearest = this.allRows(
+        `SELECT segment_id, distance AS rank_value
+         FROM memory_current_vectors
+         WHERE ${metadataClauses.join(' AND ')}
+         ORDER BY distance`,
+        vectorBlob,
+        candidateK,
+        ...metadataParameters,
+      );
+      if (nearest.length === 0) return [];
+      const ids = nearest.map((row) => String(row.segment_id));
+      const distance = new Map(
+        ids.map((id, index) => [id, Number(nearest[index]?.rank_value ?? 0)]),
+      );
+      const candidates = this.candidateClauses(filters);
+      const rows = this.allRows(
+        `SELECT segment.id AS segment_id,
+                segment.memory_id,
+                segment.revision_id,
+                segment.text,
+                segment.path
+         FROM memory_segments segment
+         JOIN memories m ON m.id = segment.memory_id
+         JOIN memory_revisions r ON r.id = segment.revision_id
+         WHERE segment.id IN (${ids.map(() => '?').join(',')}) AND ${candidates.sql}`,
+        ...ids,
+        ...candidates.parameters,
+      );
+      eligible = rows
+        .map((row) => ({
+          segmentId: String(row.segment_id),
+          memoryId: String(row.memory_id),
+          revisionId: String(row.revision_id),
+          text: String(row.text),
+          path: String(row.path),
+          rankValue: distance.get(String(row.segment_id)) ?? Number.POSITIVE_INFINITY,
+        }))
+        .sort((left, right) => left.rankValue - right.rankValue)
+        .slice(0, limit);
+      if (
+        eligible.length >= limit ||
+        nearest.length < candidateK ||
+        candidateK >= CURRENT_VECTOR_MAX_K
+      ) {
+        return eligible;
+      }
+      candidateK = Math.min(candidateK * 2, CURRENT_VECTOR_MAX_K);
+    }
   }
 
   private mergeResult(operationId: string): MemoryMergeResult {
@@ -2201,10 +2496,14 @@ export class MemoryStore {
           timestamp,
         );
       }
+      for (const duplicate of duplicates) {
+        this.refreshCurrentVectorsForMemory(duplicate.memoryId);
+      }
       return operationId;
     });
 
-    return this.mergeResult(transaction.immediate());
+    const operationId = transaction.immediate();
+    return this.mergeResult(operationId);
   }
 
   public createLink(input: {
@@ -2314,7 +2613,8 @@ export class MemoryStore {
     return this.linkFromRow(row);
   }
 
-  public linksFor(memoryId: string, atTime = now()): MemoryLink[] {
+  public linksFor(memoryId: string, atTime = now(), limit = 100): MemoryLink[] {
+    const boundedLimit = Math.max(1, Math.min(limit, 1_000));
     const links = this.allRows(
       `SELECT * FROM memory_links
            WHERE (from_memory_id = ? OR to_memory_id = ?)
@@ -2322,24 +2622,26 @@ export class MemoryStore {
              AND (deleted_at IS NULL OR deleted_at > ?)
              AND (valid_from IS NULL OR valid_from <= ?)
              AND (valid_to IS NULL OR valid_to > ?)
-           ORDER BY created_at, id`,
+           ORDER BY created_at, id
+           LIMIT ?`,
       memoryId,
       memoryId,
       atTime,
       atTime,
       atTime,
       atTime,
+      boundedLimit + 1,
     ).map((row) => this.linkFromRow(row));
     links.push(
       ...this.redirectLinksForMany([memoryId], {
         atTime,
         relations: [],
         direction: 'both',
-      }),
+      }, boundedLimit + 1),
     );
     return links.sort(
       (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    );
+    ).slice(0, boundedLimit);
   }
 
   private redirectLinksForMany(
@@ -2349,6 +2651,7 @@ export class MemoryStore {
       relations: string[];
       direction: MemoryLinkDirection;
     },
+    maxRows?: number,
   ): MemoryLink[] {
     if (memoryIds.length === 0) return [];
     if (
@@ -2386,10 +2689,12 @@ export class MemoryStore {
                OR (newer.created_at = redirect.created_at AND newer.id > redirect.id)
              )
          )
-       ORDER BY redirect.created_at, redirect.id`,
+       ORDER BY redirect.created_at, redirect.id
+       ${maxRows === undefined ? '' : 'LIMIT ?'}`,
       ...endpointParameters,
       options.atTime,
       options.atTime,
+      ...(maxRows === undefined ? [] : [maxRows]),
     ).map((row) => {
       const metadata: JsonObject = {
         mergeOperationId: String(row.operation_id),
@@ -2423,11 +2728,13 @@ export class MemoryStore {
       relations: string[];
       direction: MemoryLinkDirection;
     },
-  ): Map<string, MemoryLink[]> {
+    maxRows: number,
+  ): { linksByMemoryId: Map<string, MemoryLink[]>; truncated: boolean } {
     const linksByMemoryId = new Map<string, MemoryLink[]>(
       memoryIds.map((memoryId) => [memoryId, []]),
     );
-    if (memoryIds.length === 0) return linksByMemoryId;
+    if (memoryIds.length === 0) return { linksByMemoryId, truncated: false };
+    const boundedMaxRows = Math.max(1, Math.min(maxRows, 20_000));
     const placeholders = memoryIds.map(() => '?').join(',');
     const endpointClause =
       options.direction === 'outgoing'
@@ -2449,20 +2756,27 @@ export class MemoryStore {
          AND (valid_from IS NULL OR valid_from <= ?)
          AND (valid_to IS NULL OR valid_to > ?)
          ${relationClause}
-       ORDER BY created_at, id`,
+       ORDER BY created_at, id
+       LIMIT ?`,
       ...endpointParameters,
       options.atTime,
       options.atTime,
       options.atTime,
       options.atTime,
       ...options.relations,
+      boundedMaxRows + 1,
     );
+    const redirects = this.redirectLinksForMany(memoryIds, options, boundedMaxRows + 1);
     const links = rows.map((row) => this.linkFromRow(row));
-    links.push(...this.redirectLinksForMany(memoryIds, options));
+    links.push(...redirects);
     links.sort(
       (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
     );
-    for (const link of links) {
+    const truncated =
+      rows.length > boundedMaxRows ||
+      redirects.length > boundedMaxRows ||
+      links.length > boundedMaxRows;
+    for (const link of links.slice(0, boundedMaxRows)) {
       if (options.direction !== 'incoming' && linksByMemoryId.has(link.fromMemoryId)) {
         linksByMemoryId.get(link.fromMemoryId)?.push(link);
       }
@@ -2474,7 +2788,7 @@ export class MemoryStore {
         linksByMemoryId.get(link.toMemoryId)?.push(link);
       }
     }
-    return linksByMemoryId;
+    return { linksByMemoryId, truncated };
   }
 
   public traverseCandidates(options: {
@@ -2500,9 +2814,11 @@ export class MemoryStore {
 
     traversal: for (let depth = 1; depth <= options.maxDepth; depth += 1) {
       const next: string[] = [];
-      const linksByMemoryId = this.linksForMany(frontier, options);
+      const remaining = Math.max(1, targetCount - discoveries.length);
+      const edgeBudget = Math.min(Math.max(remaining * 4, 100), 20_000);
+      const linkPage = this.linksForMany(frontier, options, edgeBudget);
       for (const sourceId of frontier) {
-        for (const link of linksByMemoryId.get(sourceId) ?? []) {
+        for (const link of linkPage.linksByMemoryId.get(sourceId) ?? []) {
           const outgoing = link.fromMemoryId === sourceId;
           const adjacent = outgoing ? link.toMemoryId : link.fromMemoryId;
           if (visited.has(adjacent)) continue;
@@ -2520,6 +2836,10 @@ export class MemoryStore {
             break traversal;
           }
         }
+      }
+      if (linkPage.truncated) {
+        stoppedAtLimit = true;
+        break;
       }
       frontier = next;
       if (frontier.length === 0) break;
@@ -2897,7 +3217,13 @@ export class MemoryStore {
     this.database.prepare('DELETE FROM memory_fts WHERE memory_id = ?').run(memoryId);
     if (this.vectorAvailable) {
       const removeVector = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
-      for (const segmentId of segmentIds) removeVector.run(segmentId);
+      const removeCurrentVector = this.database.prepare(
+        'DELETE FROM memory_current_vectors WHERE segment_id = ?',
+      );
+      for (const segmentId of segmentIds) {
+        removeVector.run(segmentId);
+        removeCurrentVector.run(segmentId);
+      }
     }
     this.database
       .prepare(

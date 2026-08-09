@@ -317,11 +317,15 @@ export class MemoryService {
     }
 
     const items = candidates.slice(offset, offset + limit);
-    const hasMore = offset + limit < candidates.length && offset + limit < MAX_TRAVERSAL_OFFSET;
+    const consumed = offset + items.length;
+    const hasMore =
+      items.length > 0 &&
+      consumed < MAX_TRAVERSAL_OFFSET &&
+      (consumed < candidates.length || traversed.truncated);
     const page: MemoryTraversalPage = {
       items,
       nextCursor: hasMore
-        ? encodeTraversalCursor(offset + limit, atTime, fingerprint)
+        ? encodeTraversalCursor(consumed, atTime, fingerprint)
         : null,
       truncated: hasMore || traversed.truncated || exceededRankedCandidateLimit,
       atTime,

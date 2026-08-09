@@ -7,6 +7,7 @@ import { linkTraversalIndexesSql } from './002-link-traversal-indexes.js';
 import { revisionAwareFeedbackSql } from './003-revision-aware-feedback.js';
 import { logicalIdentityAndMergesSql } from './004-logical-identity-and-merges.js';
 import { spaceLifecycleAndDiscoverySql } from './005-space-lifecycle-and-discovery.js';
+import { scalingIndexesAndSpaceSearchSql } from './006-scaling-indexes-and-space-search.js';
 
 interface Migration {
   version: number;
@@ -33,6 +34,7 @@ const migrations = [
   { version: 3, name: 'revision-aware-feedback', sql: revisionAwareFeedbackSql },
   { version: 4, name: 'logical-identity-and-merges', sql: logicalIdentityAndMergesSql },
   { version: 5, name: 'space-lifecycle-and-discovery', sql: spaceLifecycleAndDiscoverySql },
+  { version: 6, name: 'scaling-indexes-and-space-search', sql: scalingIndexesAndSpaceSearchSql },
 ] satisfies readonly Migration[];
 
 export const currentSchemaVersion = migrations.at(-1)?.version ?? 0;

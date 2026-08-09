@@ -100,7 +100,7 @@ async function stop(child) {
 
 function client(name, mode) {
   return new Client(
-    { name, version: '3.2.0' },
+    { name, version: '3.2.1' },
     { versionNegotiation: { mode, probe: { timeoutMs: 5_000 } } },
   );
 }
@@ -265,7 +265,7 @@ function modernBody(id, method, params = {}, version = protocolVersion) {
       ...params,
       _meta: {
         'io.modelcontextprotocol/protocolVersion': version,
-        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.2.0' },
+        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.2.1' },
         'io.modelcontextprotocol/clientCapabilities': {},
       },
     },

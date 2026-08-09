@@ -26,7 +26,7 @@ const traversalCursorSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
 });
 
-const DEFAULT_TRAVERSAL_LIMIT = 50;
+const DEFAULT_TRAVERSAL_LIMIT = 20;
 const MAX_TRAVERSAL_LIMIT = 200;
 const MAX_TRAVERSAL_OFFSET = 10_000;
 const RANKED_TRAVERSAL_CANDIDATES = 500;

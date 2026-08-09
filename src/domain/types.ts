@@ -2,6 +2,32 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+export type SpaceState = 'active' | 'deleted';
+
+export interface SpaceRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  metadata: JsonObject;
+  createdAt: string;
+  deletedAt: string | null;
+}
+
+export interface SpaceListFilters {
+  spaceIds?: string[];
+  id?: string;
+  query?: string;
+  state?: SpaceState;
+  includeMetadata?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SpaceListPage {
+  items: SpaceRecord[];
+  nextCursor: string | null;
+}
+
 export type MemoryState = 'active' | 'archived' | 'deleted';
 export type IndexStatus = 'pending' | 'ready' | 'lexical-only' | 'failed';
 export type FeedbackScope = 'content' | 'retrieval';

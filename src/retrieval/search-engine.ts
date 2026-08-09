@@ -17,13 +17,22 @@ interface FusedCandidate {
   excerpt: string;
   path: string;
   rerankSegments: string[];
+  exactRankValue?: number;
   score: SearchScoreExplanation;
   record?: MemorySearchRecord;
 }
 
 const RRF_CONSTANT = 60;
+const DEFAULT_TOP_K = 5;
 const EXCERPT_LIMIT = 2_000;
 const EXCERPT_HEADER_LIMIT = 400;
+const RERANK_DOCUMENT_LIMIT = 8_000;
+const RERANK_EVIDENCE_SEGMENTS = 2;
+const MIN_RERANK_CANDIDATES = 3;
+const RERANK_CANDIDATE_MULTIPLIER = 2;
+const AUTO_CLEAR_LEAD_RATIO = 1.1;
+const DECISIVE_RERANKER_SCORE = 0.5;
+const DECISIVE_RUNNER_UP_RATIO = 0.02;
 
 function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
   const lines = candidate.record.revision.searchableText.split('\n');
@@ -101,6 +110,7 @@ function addRanking(
         excerpt: segment.text,
         path: segment.path,
         rerankSegments: [segment.text],
+        ...(source === 'exact' ? { exactRankValue: segment.rankValue } : {}),
         score,
       });
       continue;
@@ -113,6 +123,7 @@ function addRanking(
     else if (source === 'lexical') existing.score.lexicalRank = rank;
     else existing.score.semanticRank = rank;
     if (source === 'exact') {
+      existing.exactRankValue = segment.rankValue;
       existing.excerpt = segment.text;
       existing.path = segment.path;
       existing.revisionId = segment.revisionId;
@@ -142,8 +153,57 @@ function rerankDocument(candidate: FusedCandidate & { record: MemorySearchRecord
     .map((source) => [source.label, source.type, source.uri].filter(Boolean).join(' | '))
     .filter(Boolean);
   if (sources.length > 0) context.push(`Sources: ${sources.join('; ')}`);
-  context.push('Matched evidence:', ...candidate.rerankSegments);
-  return context.join('\n').slice(0, 16_000);
+  context.push(
+    'Matched evidence:',
+    ...candidate.rerankSegments.slice(0, RERANK_EVIDENCE_SEGMENTS),
+  );
+  return context.join('\n').slice(0, RERANK_DOCUMENT_LIMIT);
+}
+
+function isStrongExactMatch(candidate: FusedCandidate): boolean {
+  return candidate.exactRankValue !== undefined && candidate.exactRankValue <= 2;
+}
+
+function autoSearchNeedsReranking(
+  ordered: Array<FusedCandidate & { record: MemorySearchRecord }>,
+  scoped: boolean,
+): boolean {
+  if (ordered.length <= 1) return false;
+  const first = ordered[0];
+  const second = ordered[1];
+  if (!first || !second) return false;
+  if (isStrongExactMatch(first)) return false;
+  if (!scoped) return true;
+  const retrievalChannelsAgree =
+    first.score.lexicalRank === 1 && first.score.semanticRank === 1;
+  const hasClearLead = first.score.fusedScore >= second.score.fusedScore * AUTO_CLEAR_LEAD_RATIO;
+  return !(retrievalChannelsAgree && hasClearLead);
+}
+
+function rerankCandidateLimit(topK: number, configuredLimit: number): number {
+  return Math.min(
+    configuredLimit,
+    Math.max(MIN_RERANK_CANDIDATES, topK * RERANK_CANDIDATE_MULTIPLIER),
+  );
+}
+
+function pruneDecisiveRerankWinner(
+  ordered: Array<FusedCandidate & { record: MemorySearchRecord }>,
+): Array<FusedCandidate & { record: MemorySearchRecord }> {
+  const winner = ordered[0];
+  const winnerScore = winner?.score.rerankerScore;
+  if (!winner || winnerScore === undefined || winnerScore < DECISIVE_RERANKER_SCORE) {
+    return ordered;
+  }
+  const strongestAlternative = ordered.reduce((highest, candidate, index) => {
+    if (index === 0 || candidate.score.rerankerScore === undefined) return highest;
+    return Math.max(highest, candidate.score.rerankerScore);
+  }, 0);
+  const relevanceFloor = winnerScore * DECISIVE_RUNNER_UP_RATIO;
+  if (strongestAlternative >= relevanceFloor) return ordered;
+  return ordered.filter(
+    (candidate, index) => index === 0 || isStrongExactMatch(candidate),
+  );
 }
 
 export class SearchEngine {
@@ -157,7 +217,7 @@ export class SearchEngine {
   public async search(options: SearchOptions): Promise<SearchResponse> {
     const started = performance.now();
     const mode = options.mode ?? 'auto';
-    const topK = Math.max(1, Math.min(options.topK ?? 10, 50));
+    const topK = Math.max(1, Math.min(options.topK ?? DEFAULT_TOP_K, 50));
     const filters = {
       ...(options.spaceIds ? { spaceIds: options.spaceIds } : {}),
       ...(options.states ? { states: options.states } : {}),
@@ -278,9 +338,15 @@ export class SearchEngine {
       .sort((left, right) => right.score.fusedScore - left.score.fusedScore);
 
     const shouldRerank =
-      mode === 'quality' || (mode === 'auto' && this.config.modelsEnabled && ordered.length > 1);
+      mode === 'quality' ||
+      (mode === 'auto' &&
+        this.config.modelsEnabled &&
+        autoSearchNeedsReranking(ordered, options.spaceIds !== undefined));
     if (shouldRerank) {
-      const rerankSet = ordered.slice(0, this.config.rerankCandidates);
+      const rerankSet = ordered.slice(
+        0,
+        rerankCandidateLimit(topK, this.config.rerankCandidates),
+      );
       try {
         const scores = await this.models.rerank(
           options.query,
@@ -293,6 +359,7 @@ export class SearchEngine {
           candidate.score.fusedScore += score * 0.05;
         });
         ordered = ordered.sort((left, right) => right.score.fusedScore - left.score.fusedScore);
+        ordered = pruneDecisiveRerankWinner(ordered);
       } catch (error) {
         degraded = true;
         degradationReason = degradationReason

@@ -37,6 +37,10 @@ import type {
   MemoryTraversalEntry,
   MemoryTraversalPathStep,
   SegmentRecord,
+  SpaceListFilters,
+  SpaceListPage,
+  SpaceRecord,
+  SpaceState,
   SourceInput,
   StoredFeedbackScope,
   FeedbackSummary,
@@ -146,6 +150,12 @@ function assertTemporalRange(validFrom: string | undefined, validTo: string | un
 
 const listCursorSchema = z.object({ updatedAt: z.string(), id: z.string() });
 const feedbackCursorSchema = z.object({ createdAt: z.string(), id: z.string() });
+const spaceCursorSchema = z.object({
+  rank: z.number().int().min(0),
+  name: z.string(),
+  id: z.string(),
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+});
 
 function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
   try {
@@ -157,6 +167,45 @@ function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
 
 function encodeListCursor(updatedAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ updatedAt, id }), 'utf8').toString('base64url');
+}
+
+function decodeSpaceCursor(cursor: string): z.infer<typeof spaceCursorSchema> {
+  try {
+    return spaceCursorSchema.parse(
+      JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
+    );
+  } catch {
+    throw new Error('Invalid space list cursor');
+  }
+}
+
+function encodeSpaceCursor(
+  rank: number,
+  name: string,
+  id: string,
+  fingerprint: string,
+): string {
+  return Buffer.from(JSON.stringify({ rank, name, id, fingerprint }), 'utf8').toString(
+    'base64url',
+  );
+}
+
+function spaceListFingerprint(filters: SpaceListFilters): string {
+  return createHash('sha256')
+    .update(
+      stableStringify({
+        id: filters.id ?? null,
+        query: filters.query?.normalize('NFKC').trim().toLocaleLowerCase() || null,
+        spaceIds: filters.spaceIds ? [...filters.spaceIds].sort() : null,
+        state: filters.state ?? 'active',
+      }),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
 function normalizeLogicalKey(logicalKey: string | undefined): string | null {
@@ -301,6 +350,13 @@ export class MemoryStore {
     metadata?: JsonObject;
   }): Row {
     const id = input.id?.trim() || randomUUID();
+    const existing = this.getRow('SELECT deleted_at FROM spaces WHERE id = ?', id);
+    if (existing) {
+      if (existing.deleted_at !== null) {
+        throw new Error(`Memory space ${id} is deleted; restore it instead of recreating it`);
+      }
+      throw new Error(`Memory space already exists: ${id}`);
+    }
     const createdAt = now();
     this.database
       .prepare(
@@ -320,35 +376,149 @@ export class MemoryStore {
       description: input.description ?? null,
       metadata: input.metadata ?? {},
       createdAt,
+      deletedAt: null,
     };
   }
 
-  public listSpaces(spaceIds?: string[]): Row[] {
+  private spaceFromRow(row: Row, includeMetadata = true): SpaceRecord {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      description: optionalString(row.description),
+      metadata: includeMetadata ? parseObject(row.metadata_json) : {},
+      createdAt: String(row.created_at),
+      deletedAt: optionalString(row.deleted_at),
+    };
+  }
+
+  public listSpaces(filters: SpaceListFilters = {}): SpaceListPage {
     const clauses: string[] = [];
     const parameters: unknown[] = [];
-    if (spaceIds !== undefined) {
-      if (spaceIds.length === 0) clauses.push('0 = 1');
+    if (filters.spaceIds !== undefined) {
+      if (filters.spaceIds.length === 0) clauses.push('0 = 1');
       else {
-        clauses.push(`id IN (${spaceIds.map(() => '?').join(',')})`);
-        parameters.push(...spaceIds);
+        clauses.push(`id IN (${filters.spaceIds.map(() => '?').join(',')})`);
+        parameters.push(...filters.spaceIds);
       }
     }
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    return this.allRows(
-      `SELECT * FROM spaces ${where} ORDER BY created_at, id`,
+    if (filters.id) {
+      clauses.push('id = ?');
+      parameters.push(filters.id);
+    }
+    const state: SpaceState = filters.state ?? 'active';
+    clauses.push(state === 'active' ? 'deleted_at IS NULL' : 'deleted_at IS NOT NULL');
+
+    const normalizedQuery = filters.query?.normalize('NFKC').trim().toLocaleLowerCase() || null;
+    const rankParameters: unknown[] = [];
+    let rankSql = '0';
+    if (normalizedQuery) {
+      const escaped = escapeLike(normalizedQuery);
+      const prefix = `${escaped}%`;
+      const contains = `%${escaped}%`;
+      rankSql = `CASE
+        WHEN lower(id) = ? THEN 0
+        WHEN lower(name) = ? THEN 1
+        WHEN lower(id) LIKE ? ESCAPE '\\' THEN 2
+        WHEN lower(name) LIKE ? ESCAPE '\\' THEN 3
+        ELSE 4
+      END`;
+      rankParameters.push(normalizedQuery, normalizedQuery, prefix, prefix);
+      clauses.push(`(
+        lower(id) LIKE ? ESCAPE '\\'
+        OR lower(name) LIKE ? ESCAPE '\\'
+        OR lower(COALESCE(description, '')) LIKE ? ESCAPE '\\'
+      )`);
+      parameters.push(contains, contains, contains);
+    }
+
+    const fingerprint = spaceListFingerprint(filters);
+    const outerClauses: string[] = [];
+    const outerParameters: unknown[] = [];
+    if (filters.cursor) {
+      const cursor = decodeSpaceCursor(filters.cursor);
+      if (cursor.fingerprint !== fingerprint) {
+        throw new Error('Space list cursor does not match the current filters');
+      }
+      outerClauses.push(`(
+        match_rank > ?
+        OR (match_rank = ? AND normalized_name > ?)
+        OR (match_rank = ? AND normalized_name = ? AND id > ?)
+      )`);
+      outerParameters.push(
+        cursor.rank,
+        cursor.rank,
+        cursor.name,
+        cursor.rank,
+        cursor.name,
+        cursor.id,
+      );
+    }
+    const limit = Math.min(filters.limit ?? 20, 100);
+    const rows = this.allRows(
+      `SELECT * FROM (
+         SELECT spaces.*, lower(name) AS normalized_name, ${rankSql} AS match_rank
+         FROM spaces
+         WHERE ${clauses.join(' AND ')}
+       ) ranked
+       ${outerClauses.length > 0 ? `WHERE ${outerClauses.join(' AND ')}` : ''}
+       ORDER BY match_rank, normalized_name, id
+       LIMIT ?`,
+      ...rankParameters,
       ...parameters,
-    ).map((row) => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      metadata: parseObject(row.metadata_json),
-      createdAt: row.created_at,
-    }));
+      ...outerParameters,
+      limit + 1,
+    );
+    const hasMore = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const last = pageRows.at(-1);
+    return {
+      items: pageRows.map((row) => this.spaceFromRow(row, filters.includeMetadata ?? false)),
+      nextCursor:
+        hasMore && last
+          ? encodeSpaceCursor(
+              Number(last.match_rank),
+              String(last.normalized_name),
+              String(last.id),
+              fingerprint,
+            )
+          : null,
+    };
+  }
+
+  public spaceState(spaceId: string): SpaceState | null {
+    const row = this.getRow('SELECT deleted_at FROM spaces WHERE id = ?', spaceId);
+    if (!row) return null;
+    return row.deleted_at === null ? 'active' : 'deleted';
+  }
+
+  public deleteSpace(spaceId: string): SpaceRecord {
+    if (spaceId === 'default') throw new Error('The default memory space cannot be deleted');
+    const existing = this.getRow('SELECT * FROM spaces WHERE id = ?', spaceId);
+    if (!existing) throw new Error(`Memory space not found: ${spaceId}`);
+    if (existing.deleted_at !== null) return this.spaceFromRow(existing);
+    this.database
+      .prepare('UPDATE spaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+      .run(now(), spaceId);
+    return this.spaceFromRow(this.requireRow('SELECT * FROM spaces WHERE id = ?', spaceId));
+  }
+
+  public restoreSpace(spaceId: string): SpaceRecord {
+    const existing = this.getRow('SELECT * FROM spaces WHERE id = ?', spaceId);
+    if (!existing) throw new Error(`Memory space not found: ${spaceId}`);
+    if (existing.deleted_at === null) return this.spaceFromRow(existing);
+    this.database
+      .prepare('UPDATE spaces SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL')
+      .run(spaceId);
+    return this.spaceFromRow(this.requireRow('SELECT * FROM spaces WHERE id = ?', spaceId));
   }
 
   private assertSpace(spaceId: string): void {
-    if (!this.database.prepare('SELECT 1 FROM spaces WHERE id = ?').get(spaceId)) {
-      throw new Error(`Memory space not found: ${spaceId}`);
+    if (
+      !this.database
+        .prepare('SELECT 1 FROM spaces WHERE id = ? AND deleted_at IS NULL')
+        .get(spaceId)
+    ) {
+      throw new Error(`Memory space not found or deleted: ${spaceId}`);
     }
   }
 
@@ -1075,10 +1245,11 @@ export class MemoryStore {
 
   public getMemory(
     memoryId: string,
-    options: { revisionId?: string; atTime?: string } = {},
+    options: { revisionId?: string; atTime?: string; includeDeletedSpace?: boolean } = {},
   ): MemoryRecord {
     const memory = this.getRow('SELECT * FROM memories WHERE id = ?', memoryId);
     if (!memory) throw new Error(`Memory not found: ${memoryId}`);
+    if (!options.includeDeletedSpace) this.assertSpace(String(memory.space_id));
     let revision: Row | undefined;
     if (options.revisionId) {
       revision = this.getRow(
@@ -1121,6 +1292,7 @@ export class MemoryStore {
     logicalKeyInput: string,
     atTime?: string,
   ): LogicalMemoryResolution {
+    this.assertSpace(spaceId);
     const logicalKey = normalizeLogicalKey(logicalKeyInput);
     if (!logicalKey) throw new Error('logicalKey must contain non-whitespace text');
     const matched = this.getRow(
@@ -1155,6 +1327,7 @@ export class MemoryStore {
       `SELECT ${joinedMemoryColumns}, ${searchRevisionColumns}
        FROM memory_revisions r
        JOIN memories m ON m.id = r.memory_id
+       JOIN spaces space ON space.id = m.space_id AND space.deleted_at IS NULL
        WHERE r.id IN (${revisionPlaceholders})`,
       ...uniqueRevisionIds,
     );
@@ -1292,9 +1465,11 @@ export class MemoryStore {
       limit: number;
     },
   ): MemoryHistoryPage {
-    if (!this.database.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
+    const memory = this.getRow('SELECT space_id FROM memories WHERE id = ?', memoryId);
+    if (!memory) {
       throw new Error(`Memory not found: ${memoryId}`);
     }
+    this.assertSpace(String(memory.space_id));
     const columns = options.includeContent
       ? `id AS revision_id, revision_number, parent_revision_id, title, kind, content_json,
          metadata_json, salience, confidence, observed_at, valid_from, valid_to, expires_at,
@@ -1327,7 +1502,9 @@ export class MemoryStore {
   }
 
   public listMemories(filters: MemoryListFilters = {}): MemoryListPage {
-    const clauses: string[] = ['1=1'];
+    const clauses: string[] = [
+      'EXISTS (SELECT 1 FROM spaces space WHERE space.id = m.space_id AND space.deleted_at IS NULL)',
+    ];
     const parameters: unknown[] = [];
     if (filters.spaceId) {
       clauses.push('m.space_id = ?');
@@ -1614,7 +1791,7 @@ export class MemoryStore {
   public revisionForIndex(revisionId: string): MemoryRecord {
     const row = this.getRow('SELECT memory_id FROM memory_revisions WHERE id = ?', revisionId);
     if (!row) throw new Error(`Revision not found: ${revisionId}`);
-    return this.getMemory(String(row.memory_id), { revisionId });
+    return this.getMemory(String(row.memory_id), { revisionId, includeDeletedSpace: true });
   }
 
   private candidateClauses(
@@ -1624,7 +1801,9 @@ export class MemoryStore {
     sql: string;
     parameters: unknown[];
   } {
-    const clauses: string[] = [];
+    const clauses: string[] = [
+      'EXISTS (SELECT 1 FROM spaces space WHERE space.id = m.space_id AND space.deleted_at IS NULL)',
+    ];
     const parameters: unknown[] = [];
     const states = filters.states && filters.states.length > 0 ? filters.states : ['active'];
     const statePlaceholders = states.map(() => '?').join(',');
@@ -2126,6 +2305,7 @@ export class MemoryStore {
       }
       throw new Error(`Link not found: ${linkId}`);
     }
+    this.assertSpace(String(existing.space_id));
     if (existing.deleted_at !== null) return this.linkFromRow(existing);
     this.database
       .prepare('UPDATE memory_links SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
@@ -2603,7 +2783,12 @@ export class MemoryStore {
   }
 
   public queueAllCurrentForReindex(): number {
-    const rows = this.allRows("SELECT current_revision_id FROM memories WHERE state != 'deleted'");
+    const rows = this.allRows(
+      `SELECT memory.current_revision_id
+       FROM memories memory
+       JOIN spaces space ON space.id = memory.space_id AND space.deleted_at IS NULL
+       WHERE memory.state != 'deleted'`,
+    );
     const timestamp = now();
     let queued = 0;
     const transaction = this.database.transaction(() => {
@@ -2681,9 +2866,11 @@ export class MemoryStore {
     }));
     return {
       exportedAt: now(),
-      spaces: this.listSpaces(),
+      spaces: this.allRows('SELECT * FROM spaces ORDER BY created_at, id').map((space) =>
+        this.spaceFromRow(space),
+      ),
       memories: memoryIds.map((memoryId) => {
-        const memory = this.getMemory(memoryId);
+        const memory = this.getMemory(memoryId, { includeDeletedSpace: true });
         return {
           ...memory,
           history: this.getHistory(memory.id),
@@ -2759,8 +2946,9 @@ export class MemoryStore {
   }
 
   public deleteMemory(memoryId: string): boolean {
-    const exists = this.getRow('SELECT 1 FROM memories WHERE id = ?', memoryId) !== undefined;
-    if (!exists) return false;
+    const memory = this.getRow('SELECT space_id FROM memories WHERE id = ?', memoryId);
+    if (!memory) return false;
+    this.assertSpace(String(memory.space_id));
     const transaction = this.database.transaction(() => this.deleteMemoryRows(memoryId));
     transaction();
     return true;

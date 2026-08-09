@@ -138,7 +138,7 @@ function legacySearchEnvelope(query, compact, explained) {
 
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.0.1' },
+    { name: 'simple-memory-live-probe', version: '3.1.0' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({
@@ -203,6 +203,8 @@ async function run() {
     'memory_archive',
     'memory_restore',
     'memory_delete',
+    'space_delete',
+    'space_restore',
   ]) {
     assert(names.has(required), `missing MCP tool ${required}`);
   }
@@ -235,7 +237,7 @@ async function run() {
   assert(space.id === 'live-probe', 'space creation');
   assert(space.name === undefined && typeof space.createdAt === 'string', 'compact space creation');
   const spaces = await call(client, 'space_list');
-  const listedSpace = spaces.find((item) => item.id === space.id);
+  const listedSpace = spaces.items.find((item) => item.id === space.id);
   assert(listedSpace?.name === 'Live probe', 'space list should retain identifying details');
   assert(listedSpace?.createdAt === undefined, 'space list should omit creation timestamps');
 

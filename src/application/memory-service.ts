@@ -12,6 +12,7 @@ import type {
   MemoryTraversalOptions,
   MemoryTraversalPage,
   SearchOptions,
+  SpaceListFilters,
 } from '../domain/types.js';
 import type { Indexer } from '../indexing/indexer.js';
 import type { Logger } from '../logger.js';
@@ -98,8 +99,20 @@ export class MemoryService {
     return this.store.createSpace(input);
   }
 
-  public listSpaces(spaceIds?: string[]): ReturnType<MemoryStore['listSpaces']> {
-    return this.store.listSpaces(spaceIds);
+  public listSpaces(filters: SpaceListFilters): ReturnType<MemoryStore['listSpaces']> {
+    return this.store.listSpaces(filters);
+  }
+
+  public spaceState(spaceId: string): ReturnType<MemoryStore['spaceState']> {
+    return this.store.spaceState(spaceId);
+  }
+
+  public deleteSpace(spaceId: string): ReturnType<MemoryStore['deleteSpace']> {
+    return this.store.deleteSpace(spaceId);
+  }
+
+  public restoreSpace(spaceId: string): ReturnType<MemoryStore['restoreSpace']> {
+    return this.store.restoreSpace(spaceId);
   }
 
   public memorySpaceId(memoryId: string): string | null {

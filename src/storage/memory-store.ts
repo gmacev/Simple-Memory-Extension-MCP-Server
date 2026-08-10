@@ -364,8 +364,8 @@ export class MemoryStore {
                     memory.state,
                     CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
                     COALESCE(revision.kind, ''),
-                    COALESCE(revision.confidence, -1.0),
-                    COALESCE(revision.salience, -1.0),
+                    CAST(COALESCE(revision.confidence, -1) AS REAL),
+                    CAST(COALESCE(revision.salience, -1) AS REAL),
                     COALESCE(revision.valid_from, ''),
                     COALESCE(revision.valid_to, '${VECTOR_UNBOUNDED_FUTURE}'),
                     COALESCE(revision.expires_at, '${VECTOR_UNBOUNDED_FUTURE}'),
@@ -626,8 +626,8 @@ export class MemoryStore {
                   memory.state,
                   CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
                   COALESCE(revision.kind, ''),
-                  COALESCE(revision.confidence, -1),
-                  COALESCE(revision.salience, -1),
+                  CAST(COALESCE(revision.confidence, -1) AS REAL),
+                  CAST(COALESCE(revision.salience, -1) AS REAL),
                   COALESCE(revision.valid_from, ''),
                   COALESCE(revision.valid_to, ?),
                   COALESCE(revision.expires_at, ?),
@@ -1888,7 +1888,7 @@ export class MemoryStore {
            segment_id, embedding, model_profile_id, memory_id, space_id,
            memory_state, space_state, kind, confidence, salience,
            valid_from, valid_to, expires_at, recorded_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS REAL), CAST(? AS REAL), ?, ?, ?, ?)`,
       );
       const markProfile = this.database.prepare(
         'UPDATE memory_segments SET model_profile_id = ? WHERE id = ?',

@@ -19,7 +19,14 @@ function toolResult(response) {
   if (!text) throw new Error('HTTP tool did not return JSON text content');
   const parsed = JSON.parse(text.text);
   assert(text.text === JSON.stringify(parsed), 'HTTP tool result must be minified JSON');
-  assert(response.structuredContent === undefined, 'HTTP tool result must not be duplicated');
+  assert(
+    response.structuredContent !== undefined,
+    'HTTP tool result must include structuredContent',
+  );
+  assert(
+    JSON.stringify(response.structuredContent) === text.text,
+    'HTTP structuredContent must match JSON text',
+  );
   return parsed;
 }
 
@@ -85,7 +92,10 @@ async function waitForListening(child) {
 
 async function expectStartupFailure(child, expectedMessage) {
   const output = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('HTTP server did not reject unsafe startup')), 15_000);
+    const timer = setTimeout(
+      () => reject(new Error('HTTP server did not reject unsafe startup')),
+      15_000,
+    );
     let stderr = '';
     child.stderr.on('data', (chunk) => {
       stderr += chunk.toString('utf8');
@@ -132,7 +142,7 @@ async function probeOpenLoopbackServer(port) {
     });
     assert(forbidden.status === 403, 'an unapproved Origin header must be rejected');
     client = new Client(
-      { name: 'simple-memory-http-open-probe', version: '3.2.1' },
+      { name: 'simple-memory-http-open-probe', version: '3.3.0' },
       { versionNegotiation: { mode: 'auto' } },
     );
     await client.connect(

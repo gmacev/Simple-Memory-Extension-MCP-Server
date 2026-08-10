@@ -24,7 +24,11 @@ function toolResult(response) {
   assert(text, 'tool response must contain JSON text');
   const parsed = JSON.parse(text.text);
   assert(text.text === JSON.stringify(parsed), 'tool JSON must remain minified');
-  assert(response.structuredContent === undefined, 'tool result must not be duplicated');
+  assert(response.structuredContent !== undefined, 'tool result must include structuredContent');
+  assert(
+    JSON.stringify(response.structuredContent) === text.text,
+    'structuredContent must match JSON text',
+  );
   return parsed;
 }
 
@@ -69,7 +73,10 @@ function launchHttp(port, dataDir, origin) {
 
 async function waitForListening(child) {
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Protocol HTTP server startup timed out')), 15_000);
+    const timer = setTimeout(
+      () => reject(new Error('Protocol HTTP server startup timed out')),
+      15_000,
+    );
     let stderr = '';
     const finish = (callback) => {
       clearTimeout(timer);
@@ -80,7 +87,9 @@ async function waitForListening(child) {
       if (stderr.includes('listening with stateless Streamable HTTP')) finish(resolve);
     });
     child.once('exit', (code) =>
-      finish(() => reject(new Error(`Protocol HTTP server exited with ${String(code)}: ${stderr}`))),
+      finish(() =>
+        reject(new Error(`Protocol HTTP server exited with ${String(code)}: ${stderr}`)),
+      ),
     );
     child.once('error', (error) => finish(() => reject(error)));
   });
@@ -100,7 +109,7 @@ async function stop(child) {
 
 function client(name, mode) {
   return new Client(
-    { name, version: '3.2.1' },
+    { name, version: '3.3.0' },
     { versionNegotiation: { mode, probe: { timeoutMs: 5_000 } } },
   );
 }
@@ -242,8 +251,14 @@ async function connectHttp(endpoint, origin, mode, name) {
 async function statusThroughHttp(endpoint, origin, mode, expectedEra, name) {
   const connection = await connectHttp(endpoint, origin, mode, name);
   try {
-    assert(connection.instance.getProtocolEra() === expectedEra, `HTTP must negotiate ${expectedEra}`);
-    assert(connection.transport.sessionId === undefined, 'stateless HTTP must not create a session');
+    assert(
+      connection.instance.getProtocolEra() === expectedEra,
+      `HTTP must negotiate ${expectedEra}`,
+    );
+    assert(
+      connection.transport.sessionId === undefined,
+      'stateless HTTP must not create a session',
+    );
     const response = await connection.instance.callTool({
       name: 'memory_status',
       arguments: { probeModels: false },
@@ -265,7 +280,7 @@ function modernBody(id, method, params = {}, version = protocolVersion) {
       ...params,
       _meta: {
         'io.modelcontextprotocol/protocolVersion': version,
-        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.2.1' },
+        'io.modelcontextprotocol/clientInfo': { name: 'raw-protocol-probe', version: '3.3.0' },
         'io.modelcontextprotocol/clientCapabilities': {},
       },
     },
@@ -314,10 +329,9 @@ async function probeHttp() {
       );
       assert(firstList.ttlMs === 300_000, 'tools/list must advertise a five-minute TTL');
       assert(firstList.cacheScope === 'public', 'tools/list must be publicly cacheable');
-      const templates = await first.instance.listResourceTemplates(
-        undefined,
-        { cacheMode: 'refresh' },
-      );
+      const templates = await first.instance.listResourceTemplates(undefined, {
+        cacheMode: 'refresh',
+      });
       assert(templates.ttlMs === 300_000, 'resource templates must advertise a five-minute TTL');
       assert(templates.cacheScope === 'public', 'resource templates must be publicly cacheable');
       toolResult(
@@ -330,26 +344,10 @@ async function probeHttp() {
       await first.instance.close();
     }
 
-    await statusThroughHttp(
-      endpoint,
-      origin,
-      'auto',
-      'modern',
-      'simple-memory-http-modern-two',
-    );
-    await statusThroughHttp(
-      endpoint,
-      origin,
-      'legacy',
-      'legacy',
-      'simple-memory-http-legacy',
-    );
+    await statusThroughHttp(endpoint, origin, 'auto', 'modern', 'simple-memory-http-modern-two');
+    await statusThroughHttp(endpoint, origin, 'legacy', 'legacy', 'simple-memory-http-legacy');
 
-    const discoverResponse = await rawModern(
-      endpoint,
-      origin,
-      modernBody(101, 'server/discover'),
-    );
+    const discoverResponse = await rawModern(endpoint, origin, modernBody(101, 'server/discover'));
     assert(discoverResponse.status === 200, 'raw server/discover must succeed');
     assert(
       discoverResponse.headers.get('mcp-session-id') === null,
@@ -360,12 +358,9 @@ async function probeHttp() {
     assert(discover.result?.ttlMs === 300_000, 'discover TTL');
     assert(discover.result?.cacheScope === 'public', 'discover cache scope');
 
-    const missingMethod = await rawModern(
-      endpoint,
-      origin,
-      modernBody(102, 'tools/list'),
-      { 'Mcp-Method': '' },
-    );
+    const missingMethod = await rawModern(endpoint, origin, modernBody(102, 'tools/list'), {
+      'Mcp-Method': '',
+    });
     assert(missingMethod.status === 400, 'missing Mcp-Method must be rejected');
 
     const unsupported = modernBody(103, 'tools/list', {}, '2099-01-01');

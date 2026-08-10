@@ -1,6 +1,6 @@
 {
   "name": "simple-memory-extension-mcp-server",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "A local-first, generic persistent memory layer for MCP agents",
   "repository": {
     "type": "git",
@@ -33,6 +33,8 @@
     "probe:live": "node scripts/live-probe.mjs",
     "probe:http": "node scripts/http-probe.mjs",
     "probe:protocol": "node scripts/protocol-probe.mjs",
+    "probe:structured-output": "node scripts/structured-output-probe.mjs",
+    "probe:vector-metadata": "node scripts/vector-metadata-probe.mjs",
     "probe:queue": "node scripts/queue-probe.mjs",
     "format": "biome check --write src scripts",
     "lint": "biome check src scripts"

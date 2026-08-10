@@ -83,20 +83,13 @@ function seedDeletionProbeVector(segmentId) {
         .get(segmentId).count,
     );
     if (existing > 0) return;
-    const dimensions = Number.parseInt(
-      process.env.SIMPLE_MEMORY_EMBEDDING_DIMENSION ?? '1024',
-      10,
-    );
+    const dimensions = Number.parseInt(process.env.SIMPLE_MEMORY_EMBEDDING_DIMENSION ?? '1024', 10);
     database
       .prepare(
         `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
          VALUES (?, ?, ?)`,
       )
-      .run(
-        segmentId,
-        Buffer.from(new Float32Array(dimensions).buffer),
-        'deletion-integrity-probe',
-      );
+      .run(segmentId, Buffer.from(new Float32Array(dimensions).buffer), 'deletion-integrity-probe');
   } finally {
     database.close();
   }
@@ -138,7 +131,7 @@ function legacySearchEnvelope(query, compact, explained) {
 
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.2.1' },
+    { name: 'simple-memory-live-probe', version: '3.3.0' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({
@@ -172,7 +165,11 @@ async function call(client, name, args = {}) {
   const parsed = toolResult(response);
   const text = response.content.find((item) => item.type === 'text');
   assert(text?.text === JSON.stringify(parsed), `${name} should return minified canonical JSON`);
-  assert(response.structuredContent === undefined, `${name} should not duplicate its JSON result`);
+  assert(response.structuredContent !== undefined, `${name} should return structuredContent`);
+  assert(
+    JSON.stringify(response.structuredContent) === text?.text,
+    `${name} structuredContent should match canonical JSON`,
+  );
   assert(
     !JSON.stringify(parsed).includes('"resourceUri"'),
     `${name} should use MCP resource links instead of JSON resourceUri fields`,

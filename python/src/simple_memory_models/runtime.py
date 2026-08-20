@@ -10,9 +10,9 @@ import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_EMBEDDING_MODEL = "codefuse-ai/F2LLM-v2-330M"
 DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
-DEFAULT_EMBEDDING_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+DEFAULT_EMBEDDING_REVISION = "1b8f03017b9f12220a3ab3a1d0b1fbe441cede93"
 DEFAULT_RERANKER_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
 DEFAULT_QUERY_INSTRUCTION = (
     "Given a memory query, retrieve stored information useful for answering the query "

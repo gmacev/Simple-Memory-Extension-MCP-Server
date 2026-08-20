@@ -83,7 +83,7 @@ function seedDeletionProbeVector(segmentId) {
         .get(segmentId).count,
     );
     if (existing > 0) return;
-    const dimensions = Number.parseInt(process.env.SIMPLE_MEMORY_EMBEDDING_DIMENSION ?? '1024', 10);
+    const dimensions = Number.parseInt(process.env.SIMPLE_MEMORY_EMBEDDING_DIMENSION ?? '896', 10);
     database
       .prepare(
         `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
@@ -131,7 +131,7 @@ function legacySearchEnvelope(query, compact, explained) {
 
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.4.0' },
+    { name: 'simple-memory-live-probe', version: '3.5.0' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({
@@ -510,7 +510,7 @@ async function run() {
     });
     assert(
       semantic.degraded === undefined,
-      'quality search should have both Qwen models available',
+      'quality search should have both configured models available',
     );
     assert(semantic.results[0]?.id === lease.id, 'semantic paraphrase should retrieve the lease');
 

@@ -3,12 +3,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type AccessConfiguration, parseFixedAccess } from './access/authorization.js';
 
+export const DEFAULT_EMBEDDING_MODEL = 'codefuse-ai/F2LLM-v2-330M';
+export const DEFAULT_EMBEDDING_REVISION = '1b8f03017b9f12220a3ab3a1d0b1fbe441cede93';
+export const DEFAULT_EMBEDDING_DIMENSION = 896;
+export const DEFAULT_QUERY_INSTRUCTION =
+  'Given a memory query, retrieve stored information useful for answering the query or guiding an action.';
+
 export interface AppConfig {
   dataDir: string;
   databasePath: string;
   pythonProjectPath: string;
   pythonExecutablePath: string;
   modelsEnabled: boolean;
+  embeddingModel: string;
+  embeddingRevision: string;
+  queryInstruction: string;
   embeddingDimension: number;
   embeddingBatchSize: number;
   rerankBatchSize: number;
@@ -124,7 +133,13 @@ export function loadConfig(): AppConfig {
       process.env.SIMPLE_MEMORY_PYTHON ?? defaultPythonExecutable(pythonProjectPath),
     ),
     modelsEnabled: process.env.SIMPLE_MEMORY_MODELS !== 'disabled',
-    embeddingDimension: integerEnvironment('SIMPLE_MEMORY_EMBEDDING_DIMENSION', 1024),
+    embeddingModel: process.env.SIMPLE_MEMORY_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL,
+    embeddingRevision: process.env.SIMPLE_MEMORY_EMBEDDING_REVISION ?? DEFAULT_EMBEDDING_REVISION,
+    queryInstruction: process.env.SIMPLE_MEMORY_QUERY_INSTRUCTION ?? DEFAULT_QUERY_INSTRUCTION,
+    embeddingDimension: integerEnvironment(
+      'SIMPLE_MEMORY_EMBEDDING_DIMENSION',
+      DEFAULT_EMBEDDING_DIMENSION,
+    ),
     embeddingBatchSize: integerEnvironment('SIMPLE_MEMORY_EMBED_BATCH_SIZE', 8),
     rerankBatchSize: integerEnvironment('SIMPLE_MEMORY_RERANK_BATCH_SIZE', 4),
     modelTimeoutMs: integerEnvironment('SIMPLE_MEMORY_MODEL_TIMEOUT_MS', 600_000),

@@ -1,6 +1,6 @@
 {
   "name": "simple-memory-extension-mcp-server",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "A local-first, generic persistent memory layer for MCP agents",
   "repository": {
     "type": "git",
@@ -37,6 +37,8 @@
     "probe:vector-metadata": "node scripts/vector-metadata-probe.mjs",
     "probe:queue": "node scripts/queue-probe.mjs",
     "probe:startup-index-drain": "node scripts/startup-index-drain-probe.mjs",
+    "probe:embedding-generation": "node scripts/embedding-generation-probe.mjs",
+    "probe:embedding-upgrade": "node scripts/embedding-upgrade-probe.mjs",
     "probe:inference-scheduler": "node scripts/inference-scheduler-probe.mjs",
     "probe:model-protocol": "node scripts/python-worker-protocol-probe.mjs",
     "format": "biome check --write src scripts",
@@ -48,7 +50,7 @@
     "semantic-search",
     "sqlite",
     "agents",
-    "qwen"
+    "f2llm"
   ],
   "author": "gmacev",
   "license": "MIT",

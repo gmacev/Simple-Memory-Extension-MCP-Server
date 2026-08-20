@@ -8,6 +8,8 @@ import { revisionAwareFeedbackSql } from './003-revision-aware-feedback.js';
 import { logicalIdentityAndMergesSql } from './004-logical-identity-and-merges.js';
 import { spaceLifecycleAndDiscoverySql } from './005-space-lifecycle-and-discovery.js';
 import { scalingIndexesAndSpaceSearchSql } from './006-scaling-indexes-and-space-search.js';
+import { embeddingIndexGenerationsSql } from './007-embedding-index-generations.js';
+import { currentEmbeddingGenerationSql } from './008-current-embedding-generation.js';
 
 interface Migration {
   version: number;
@@ -35,6 +37,8 @@ const migrations = [
   { version: 4, name: 'logical-identity-and-merges', sql: logicalIdentityAndMergesSql },
   { version: 5, name: 'space-lifecycle-and-discovery', sql: spaceLifecycleAndDiscoverySql },
   { version: 6, name: 'scaling-indexes-and-space-search', sql: scalingIndexesAndSpaceSearchSql },
+  { version: 7, name: 'embedding-index-generations', sql: embeddingIndexGenerationsSql },
+  { version: 8, name: 'current-embedding-generation', sql: currentEmbeddingGenerationSql },
 ] satisfies readonly Migration[];
 
 export const currentSchemaVersion = migrations.at(-1)?.version ?? 0;

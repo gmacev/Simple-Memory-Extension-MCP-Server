@@ -1,7 +1,7 @@
 [project]
 name = "simple-memory-models"
-version = "3.4.0"
-description = "Persistent Qwen embedding and reranking worker for Simple Memory"
+version = "3.5.0"
+description = "Persistent embedding and reranking worker for Simple Memory"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "sentence-transformers>=5.6.0,<6",

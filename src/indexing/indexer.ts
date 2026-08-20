@@ -3,7 +3,7 @@ import type { AppConfig } from '../config.js';
 import type { MemoryRecord, SegmentRecord } from '../domain/types.js';
 import type { Logger } from '../logger.js';
 import type { ModelClient } from '../models/model-client.js';
-import type { MemoryStore } from '../storage/memory-store.js';
+import type { ClaimedIndexJob, MemoryStore } from '../storage/memory-store.js';
 import { createSegments } from './projector.js';
 
 const MAX_SEGMENT_TOKENS = 1_200;
@@ -69,32 +69,46 @@ export class Indexer {
     revisionId: string,
     alreadyClaimed = false,
     preparedRecord?: MemoryRecord,
+    claimedJob?: ClaimedIndexJob,
   ): Promise<MemoryRecord> {
     if (!alreadyClaimed) this.store.markRevisionIndexRunning(revisionId);
     const record = preparedRecord ?? this.store.revisionForIndex(revisionId);
-    let segments = createSegments({
-      memoryId: record.id,
-      revisionId: record.revision.id,
-      spaceId: record.spaceId,
-      title: record.revision.title,
-      kind: record.revision.kind,
-      content: record.revision.content,
-      tags: record.revision.tags,
-      metadata: record.revision.metadata,
-      sources: record.revision.sources,
-    });
-    try {
-      segments = await this.exactTokenize(segments);
-    } catch (error) {
-      this.logger.warn('Exact Qwen token counting failed; retaining deterministic estimates', {
-        revisionId,
-        error: String(error),
+    const requiresSemanticIndex = claimedJob?.embeddingGenerationId != null;
+    let segments = requiresSemanticIndex ? this.store.segmentsForRevision(revisionId) : [];
+    if (segments.length === 0) {
+      segments = createSegments({
+        memoryId: record.id,
+        revisionId: record.revision.id,
+        spaceId: record.spaceId,
+        title: record.revision.title,
+        kind: record.revision.kind,
+        content: record.revision.content,
+        tags: record.revision.tags,
+        metadata: record.revision.metadata,
+        sources: record.revision.sources,
       });
+      try {
+        segments = await this.exactTokenize(segments);
+      } catch (error) {
+        this.logger.warn('Exact model token counting failed; retaining deterministic estimates', {
+          revisionId,
+          error: String(error),
+        });
+      }
+      this.store.indexSegments(revisionId, segments, record.revision.title, record.revision.tags);
     }
-    this.store.indexSegments(revisionId, segments, record.revision.title, record.revision.tags);
     if (!this.config.modelsEnabled || !this.store.vectorAvailable) {
-      this.store.markIndexStatus(revisionId, 'lexical-only');
-      return this.store.getMemory(record.id);
+      const error = 'Semantic models or sqlite-vec are unavailable';
+      this.store.markIndexStatus(
+        revisionId,
+        'lexical-only',
+        requiresSemanticIndex ? error : undefined,
+        claimedJob
+          ? { id: claimedJob.id, status: requiresSemanticIndex ? 'failed' : 'complete' }
+          : undefined,
+      );
+      if (requiresSemanticIndex) throw new Error(error);
+      return this.store.revisionForIndex(revisionId);
     }
     try {
       const vectors = await this.models.embedDocuments(segments.map((segment) => segment.text));
@@ -118,31 +132,73 @@ export class Indexer {
         dimensions: profile.embedding_dimension,
         instructionHash: profile.query_instruction_hash,
       });
+      if (
+        claimedJob?.embeddingGenerationId &&
+        modelProfileId !== claimedJob.embeddingGenerationId
+      ) {
+        throw new Error(
+          `Embedding generation ${claimedJob.embeddingGenerationId} does not match loaded model profile ${modelProfileId}`,
+        );
+      }
       this.store.indexVectors(segments, vectors, modelProfileId);
-      this.store.markIndexStatus(revisionId, 'ready');
+      this.store.markIndexStatus(
+        revisionId,
+        'ready',
+        undefined,
+        claimedJob ? { id: claimedJob.id, status: 'complete' } : undefined,
+      );
     } catch (error) {
       this.logger.warn('Semantic indexing degraded; lexical index remains available', {
         revisionId,
         error: String(error),
       });
-      this.store.markIndexStatus(revisionId, 'lexical-only', String(error));
+      this.store.markIndexStatus(
+        revisionId,
+        'lexical-only',
+        String(error),
+        claimedJob
+          ? { id: claimedJob.id, status: requiresSemanticIndex ? 'failed' : 'complete' }
+          : undefined,
+      );
+      if (requiresSemanticIndex) throw error;
     }
-    return this.store.getMemory(record.id);
+    return this.store.revisionForIndex(revisionId);
   }
 
-  public async indexPending(createdBefore?: string): Promise<{ indexed: number; failed: number }> {
+  public async indexPending(
+    createdBefore?: string,
+    options: {
+      embeddingGenerationId?: string;
+      includeEmbeddingGenerations?: boolean;
+      onProgress?: (indexed: number, failed: number) => void;
+    } = {},
+  ): Promise<{ indexed: number; failed: number }> {
     let indexed = 0;
     let failed = 0;
     while (true) {
-      const revisionId = this.store.claimNextPendingRevision(createdBefore);
-      if (!revisionId) break;
+      const job = this.store.claimNextPendingRevision(createdBefore, {
+        ...(options.embeddingGenerationId
+          ? { embeddingGenerationId: options.embeddingGenerationId }
+          : {}),
+        includeEmbeddingGenerations:
+          options.includeEmbeddingGenerations ?? this.config.modelsEnabled,
+      });
+      if (!job) break;
       try {
-        await this.indexRevision(revisionId, true);
+        await this.indexRevision(job.revisionId, true, undefined, job);
         indexed += 1;
       } catch (error) {
         failed += 1;
-        this.store.markIndexStatus(revisionId, 'failed', String(error));
+        if (job.embeddingGenerationId) {
+          this.store.failClaimedIndexJob(job.id, String(error));
+        } else {
+          this.store.markIndexStatus(job.revisionId, 'failed', String(error), {
+            id: job.id,
+            status: 'failed',
+          });
+        }
       }
+      options.onProgress?.(indexed, failed);
     }
     return { indexed, failed };
   }

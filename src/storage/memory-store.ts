@@ -60,6 +60,32 @@ export interface RankedSegment {
   rankValue: number;
 }
 
+export interface EmbeddingIndexProfile {
+  provider: string;
+  model: string;
+  modelRevision: string;
+  dimensions: number;
+  instructionHash: string;
+}
+
+export interface EmbeddingGenerationProgress {
+  id: string;
+  status: 'pending' | 'running' | 'complete' | 'failed';
+  isCurrent: boolean;
+  total: number;
+  completed: number;
+  pending: number;
+  running: number;
+  failed: number;
+  requiresRebuild: boolean;
+}
+
+export interface ClaimedIndexJob {
+  id: string;
+  revisionId: string;
+  embeddingGenerationId: string | null;
+}
+
 interface CandidateFilters {
   spaceIds?: string[];
   states?: MemoryState[];
@@ -80,6 +106,20 @@ interface MemoryIdentityInfo {
   logicalKey: string | null;
   canonicalMemoryId: string | null;
   mergedMemoryCount: number;
+}
+
+function embeddingProfileId(input: EmbeddingIndexProfile): string {
+  return createHash('sha256')
+    .update(
+      stableStringify({
+        dimensions: input.dimensions,
+        instructionHash: input.instructionHash,
+        model: input.model,
+        modelRevision: input.modelRevision,
+        provider: input.provider,
+      }),
+    )
+    .digest('hex');
 }
 
 const contentFeedbackSignals = [
@@ -289,7 +329,7 @@ export class MemoryStore {
   public readonly vectorAvailable: boolean;
 
   public constructor(
-    config: AppConfig,
+    private readonly config: AppConfig,
     private readonly logger: Logger,
   ) {
     mkdirSync(path.dirname(config.databasePath), { recursive: true });
@@ -316,71 +356,7 @@ export class MemoryStore {
     this.ensureDefaultSpace();
     let vectorAvailable = false;
     if (vectorExtensionLoaded) {
-      this.database.exec(
-        `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
-          segment_id TEXT PRIMARY KEY,
-          embedding float[${config.embeddingDimension}],
-          model_profile_id TEXT PARTITION KEY
-        )`,
-      );
-      let initializedCurrentVectors = false;
-      const initializeCurrentVectors = this.database.transaction(() => {
-        const currentVectorTableExists =
-          this.database
-            .prepare(
-              "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_current_vectors'",
-            )
-            .get() !== undefined;
-        this.database.exec(
-          `CREATE VIRTUAL TABLE IF NOT EXISTS memory_current_vectors USING vec0(
-              segment_id TEXT PRIMARY KEY,
-              embedding float[${config.embeddingDimension}],
-              model_profile_id TEXT PARTITION KEY,
-              memory_id TEXT,
-              space_id TEXT,
-              memory_state TEXT,
-              space_state TEXT,
-              kind TEXT,
-              confidence FLOAT,
-              salience FLOAT,
-              valid_from TEXT,
-              valid_to TEXT,
-              expires_at TEXT,
-              recorded_at TEXT
-            )`,
-        );
-        if (!currentVectorTableExists) {
-          this.database.exec(
-            `INSERT INTO memory_current_vectors(
-               segment_id, embedding, model_profile_id, memory_id, space_id,
-               memory_state, space_state, kind, confidence, salience,
-               valid_from, valid_to, expires_at, recorded_at
-             )
-             SELECT vector.segment_id,
-                    vector.embedding,
-                    vector.model_profile_id,
-                    memory.id,
-                    memory.space_id,
-                    memory.state,
-                    CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
-                    COALESCE(revision.kind, ''),
-                    CAST(COALESCE(revision.confidence, -1) AS REAL),
-                    CAST(COALESCE(revision.salience, -1) AS REAL),
-                    COALESCE(revision.valid_from, ''),
-                    COALESCE(revision.valid_to, '${VECTOR_UNBOUNDED_FUTURE}'),
-                    COALESCE(revision.expires_at, '${VECTOR_UNBOUNDED_FUTURE}'),
-                    revision.recorded_at
-             FROM memory_vectors vector
-             JOIN memory_segments segment ON segment.id = vector.segment_id
-             JOIN memories memory ON memory.id = segment.memory_id
-             JOIN memory_revisions revision ON revision.id = segment.revision_id
-             JOIN spaces space ON space.id = memory.space_id
-             WHERE memory.current_revision_id = segment.revision_id`,
-          );
-          initializedCurrentVectors = true;
-        }
-      });
-      initializeCurrentVectors.immediate();
+      const initializedCurrentVectors = this.ensureVectorTables();
       if (initializedCurrentVectors) {
         this.logger.info('Initialized current-revision vector index');
       }
@@ -388,6 +364,75 @@ export class MemoryStore {
     }
     this.vectorAvailable = vectorAvailable;
     this.database.pragma('optimize = 0x10002');
+  }
+
+  private ensureVectorTables(): boolean {
+    this.database.exec(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
+        segment_id TEXT PRIMARY KEY,
+        embedding float[${this.config.embeddingDimension}],
+        model_profile_id TEXT PARTITION KEY
+      )`,
+    );
+    let initializedCurrentVectors = false;
+    const initializeCurrentVectors = this.database.transaction(() => {
+      const currentVectorTableExists =
+        this.database
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_current_vectors'",
+          )
+          .get() !== undefined;
+      this.database.exec(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS memory_current_vectors USING vec0(
+            segment_id TEXT PRIMARY KEY,
+            embedding float[${this.config.embeddingDimension}],
+            model_profile_id TEXT PARTITION KEY,
+            memory_id TEXT,
+            space_id TEXT,
+            memory_state TEXT,
+            space_state TEXT,
+            kind TEXT,
+            confidence FLOAT,
+            salience FLOAT,
+            valid_from TEXT,
+            valid_to TEXT,
+            expires_at TEXT,
+            recorded_at TEXT
+          )`,
+      );
+      if (!currentVectorTableExists) {
+        this.database.exec(
+          `INSERT INTO memory_current_vectors(
+             segment_id, embedding, model_profile_id, memory_id, space_id,
+             memory_state, space_state, kind, confidence, salience,
+             valid_from, valid_to, expires_at, recorded_at
+           )
+           SELECT vector.segment_id,
+                  vector.embedding,
+                  vector.model_profile_id,
+                  memory.id,
+                  memory.space_id,
+                  memory.state,
+                  CASE WHEN space.deleted_at IS NULL THEN 'active' ELSE 'deleted' END,
+                  COALESCE(revision.kind, ''),
+                  CAST(COALESCE(revision.confidence, -1) AS REAL),
+                  CAST(COALESCE(revision.salience, -1) AS REAL),
+                  COALESCE(revision.valid_from, ''),
+                  COALESCE(revision.valid_to, '${VECTOR_UNBOUNDED_FUTURE}'),
+                  COALESCE(revision.expires_at, '${VECTOR_UNBOUNDED_FUTURE}'),
+                  revision.recorded_at
+           FROM memory_vectors vector
+           JOIN memory_segments segment ON segment.id = vector.segment_id
+           JOIN memories memory ON memory.id = segment.memory_id
+           JOIN memory_revisions revision ON revision.id = segment.revision_id
+           JOIN spaces space ON space.id = memory.space_id
+           WHERE memory.current_revision_id = segment.revision_id`,
+        );
+        initializedCurrentVectors = true;
+      }
+    });
+    initializeCurrentVectors.immediate();
+    return initializedCurrentVectors;
   }
 
   private ensureDefaultSpace(): void {
@@ -661,14 +706,7 @@ export class MemoryStore {
     dimensions: number;
     instructionHash: string;
   }): string {
-    const identity = stableStringify({
-      dimensions: input.dimensions,
-      instructionHash: input.instructionHash,
-      model: input.model,
-      modelRevision: input.modelRevision,
-      provider: input.provider,
-    });
-    const id = createHash('sha256').update(identity).digest('hex');
+    const id = embeddingProfileId(input);
     if (this.ensuredModelProfileIds.has(id)) return id;
     this.database
       .prepare(
@@ -1780,7 +1818,12 @@ export class MemoryStore {
     return this.getMemory(memoryId);
   }
 
-  public markIndexStatus(revisionId: string, status: IndexStatus, error?: string): void {
+  public markIndexStatus(
+    revisionId: string,
+    status: IndexStatus,
+    error?: string,
+    claimedJob?: { id: string; status?: 'complete' | 'failed' },
+  ): void {
     const timestamp = now();
     const transaction = this.database.transaction(() => {
       this.database
@@ -1789,17 +1832,24 @@ export class MemoryStore {
            WHERE current_revision_id = ?`,
         )
         .run(status, revisionId);
-      this.database
-        .prepare(
-          `UPDATE index_jobs SET status = ?, error = ?, updated_at = ?
-           WHERE revision_id = ? AND status IN ('pending', 'running')`,
-        )
-        .run(
-          status === 'ready' || status === 'lexical-only' ? 'complete' : 'failed',
-          error ?? null,
-          timestamp,
-          revisionId,
-        );
+      const jobStatus =
+        claimedJob?.status ??
+        (status === 'ready' || status === 'lexical-only' ? 'complete' : 'failed');
+      if (claimedJob) {
+        this.database
+          .prepare(
+            `UPDATE index_jobs SET status = ?, error = ?, updated_at = ?
+             WHERE id = ? AND status IN ('pending', 'running')`,
+          )
+          .run(jobStatus, error ?? null, timestamp, claimedJob.id);
+      } else {
+        this.database
+          .prepare(
+            `UPDATE index_jobs SET status = ?, error = ?, updated_at = ?
+             WHERE revision_id = ? AND status IN ('pending', 'running')`,
+          )
+          .run(jobStatus, error ?? null, timestamp, revisionId);
+      }
     });
     transaction();
   }
@@ -1963,13 +2013,33 @@ export class MemoryStore {
       .run(now(), revisionId);
   }
 
-  public claimNextPendingRevision(createdBefore?: string): string | null {
+  public failClaimedIndexJob(jobId: string, error: string): void {
+    this.database
+      .prepare(
+        `UPDATE index_jobs SET status = 'failed', error = ?, updated_at = ?
+         WHERE id = ? AND status = 'running'`,
+      )
+      .run(error, now(), jobId);
+  }
+
+  public claimNextPendingRevision(
+    createdBefore?: string,
+    options: { embeddingGenerationId?: string; includeEmbeddingGenerations?: boolean } = {},
+  ): ClaimedIndexJob | null {
     const transaction = this.database.transaction(() => {
+      const generationFilter = options.embeddingGenerationId
+        ? ' AND embedding_generation_id = ?'
+        : options.includeEmbeddingGenerations === false
+          ? ' AND embedding_generation_id IS NULL'
+          : '';
+      const parameters: unknown[] = [];
+      if (createdBefore) parameters.push(createdBefore);
+      if (options.embeddingGenerationId) parameters.push(options.embeddingGenerationId);
       const job = this.getRow(
-        `SELECT id, revision_id FROM index_jobs
-         WHERE status = 'pending'${createdBefore ? ' AND created_at <= ?' : ''}
+        `SELECT id, revision_id, embedding_generation_id FROM index_jobs
+         WHERE status = 'pending'${createdBefore ? ' AND created_at <= ?' : ''}${generationFilter}
          ORDER BY created_at, id LIMIT 1`,
-        ...(createdBefore ? [createdBefore] : []),
+        ...parameters,
       );
       if (!job) return null;
       const claimed = this.database
@@ -1979,7 +2049,13 @@ export class MemoryStore {
            WHERE id = ? AND status = 'pending'`,
         )
         .run(now(), job.id);
-      return claimed.changes === 1 ? String(job.revision_id) : null;
+      return claimed.changes === 1
+        ? {
+            id: String(job.id),
+            revisionId: String(job.revision_id),
+            embeddingGenerationId: optionalString(job.embedding_generation_id),
+          }
+        : null;
     });
     return transaction();
   }
@@ -1988,6 +2064,24 @@ export class MemoryStore {
     const row = this.getRow('SELECT memory_id FROM memory_revisions WHERE id = ?', revisionId);
     if (!row) throw new Error(`Revision not found: ${revisionId}`);
     return this.getMemory(String(row.memory_id), { revisionId, includeDeletedSpace: true });
+  }
+
+  public segmentsForRevision(revisionId: string): SegmentRecord[] {
+    return this.allRows(
+      `SELECT id, memory_id, revision_id, space_id, ordinal, path, text, token_count, content_hash
+       FROM memory_segments WHERE revision_id = ? ORDER BY ordinal`,
+      revisionId,
+    ).map((row) => ({
+      id: String(row.id),
+      memoryId: String(row.memory_id),
+      revisionId: String(row.revision_id),
+      spaceId: String(row.space_id),
+      ordinal: Number(row.ordinal),
+      path: String(row.path),
+      text: String(row.text),
+      tokenCount: Number(row.token_count),
+      contentHash: String(row.content_hash),
+    }));
   }
 
   private candidateClauses(
@@ -3102,6 +3196,231 @@ export class MemoryStore {
       ...this.migrations,
       applied: this.migrations.applied.map((migration) => ({ ...migration })),
     };
+  }
+
+  public retainedRevisionCount(): number {
+    return Number(this.requireRow('SELECT COUNT(*) AS count FROM memory_revisions').count);
+  }
+
+  public embeddingGenerationProgress(
+    profile: EmbeddingIndexProfile,
+  ): EmbeddingGenerationProgress | null {
+    const id = embeddingProfileId(profile);
+    const generation = this.getRow(
+      'SELECT status, is_current FROM embedding_index_generations WHERE id = ?',
+      id,
+    );
+    if (!generation) return null;
+    const counts = this.requireRow(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+              SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM index_jobs WHERE embedding_generation_id = ?`,
+      id,
+    );
+    const status = String(generation.status) as EmbeddingGenerationProgress['status'];
+    return {
+      id,
+      status,
+      isCurrent: Number(generation.is_current) === 1,
+      total: Number(counts.total),
+      completed: Number(counts.completed ?? 0),
+      pending: Number(counts.pending ?? 0),
+      running: Number(counts.running ?? 0),
+      failed: Number(counts.failed ?? 0),
+      requiresRebuild: status !== 'complete',
+    };
+  }
+
+  public prepareEmbeddingGeneration(profile: EmbeddingIndexProfile): EmbeddingGenerationProgress {
+    if (!this.vectorAvailable) {
+      throw new Error('sqlite-vec is unavailable; the semantic index cannot be rebuilt');
+    }
+    const id = embeddingProfileId(profile);
+    const existing = this.getRow(
+      `SELECT status, revision_cutoff, vectors_reset_at, is_current
+       FROM embedding_index_generations WHERE id = ?`,
+      id,
+    );
+    if (existing?.status === 'complete' && Number(existing.is_current) === 1) {
+      const progress = this.embeddingGenerationProgress(profile);
+      if (!progress) throw new Error('Embedding generation disappeared while being inspected');
+      return progress;
+    }
+
+    const timestamp = now();
+    const resumesCurrentGeneration = existing != null && Number(existing.is_current) === 1;
+    const cutoff = resumesCurrentGeneration ? String(existing.revision_cutoff) : timestamp;
+    const prepare = this.database.transaction(() => {
+      if (!existing) {
+        this.database
+          .prepare(
+            `INSERT INTO embedding_index_generations(
+               id, provider, model, model_revision, dimensions, instruction_hash,
+               status, revision_cutoff, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          )
+          .run(
+            id,
+            profile.provider,
+            profile.model,
+            profile.modelRevision,
+            profile.dimensions,
+            profile.instructionHash,
+            cutoff,
+            timestamp,
+            timestamp,
+          );
+      }
+
+      if (!resumesCurrentGeneration && existing) {
+        this.database
+          .prepare('DELETE FROM index_jobs WHERE embedding_generation_id = ?')
+          .run(id);
+        this.database
+          .prepare(
+            `UPDATE embedding_index_generations
+             SET status = 'pending', revision_cutoff = ?, vectors_reset_at = NULL,
+                 completed_at = NULL, error = NULL, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(cutoff, timestamp, id);
+      }
+
+      this.database
+        .prepare(
+          `UPDATE embedding_index_generations
+           SET status = CASE WHEN status = 'complete' THEN status ELSE 'failed' END,
+               is_current = 0,
+               error = CASE
+                 WHEN status = 'complete' THEN error
+                 ELSE 'Superseded by a newer embedding profile'
+               END,
+               updated_at = ?
+           WHERE id != ?`,
+        )
+        .run(timestamp, id);
+      this.database
+        .prepare('UPDATE embedding_index_generations SET is_current = 1 WHERE id = ?')
+        .run(id);
+      this.database
+        .prepare(
+          `UPDATE index_jobs
+           SET status = 'failed', error = 'Superseded by a newer embedding profile', updated_at = ?
+           WHERE embedding_generation_id != ? AND status IN ('pending', 'running')`,
+        )
+        .run(timestamp, id);
+
+      if (!resumesCurrentGeneration || !existing?.vectors_reset_at) {
+        this.database.exec('DROP TABLE IF EXISTS memory_current_vectors');
+        this.database.exec('DROP TABLE IF EXISTS memory_vectors');
+        this.ensureVectorTables();
+        this.database.prepare('UPDATE memory_segments SET model_profile_id = NULL').run();
+        this.database
+          .prepare(
+            `UPDATE memories SET index_status = 'pending'
+             WHERE current_revision_id IN (
+               SELECT id FROM memory_revisions WHERE recorded_at <= ?
+             )`,
+          )
+          .run(cutoff);
+        this.database
+          .prepare(
+            `UPDATE index_jobs
+             SET status = 'failed', error = 'Superseded by embedding index rebuild', updated_at = ?
+             WHERE embedding_generation_id IS NULL AND status IN ('pending', 'running')`,
+          )
+          .run(timestamp);
+        this.database
+          .prepare(
+            `UPDATE embedding_index_generations
+             SET vectors_reset_at = ?, updated_at = ? WHERE id = ?`,
+          )
+          .run(timestamp, timestamp, id);
+      }
+
+      const revisions = this.allRows(
+        'SELECT id FROM memory_revisions WHERE recorded_at <= ? ORDER BY recorded_at, id',
+        cutoff,
+      );
+      const insert = this.database.prepare(
+        `INSERT OR IGNORE INTO index_jobs(
+           id, revision_id, status, attempts, created_at, updated_at, embedding_generation_id
+         ) VALUES (?, ?, 'pending', 0, ?, ?, ?)`,
+      );
+      for (const revision of revisions) {
+        insert.run(randomUUID(), revision.id, timestamp, timestamp, id);
+      }
+      this.database
+        .prepare(
+          `UPDATE index_jobs
+           SET status = 'pending', error = NULL, updated_at = ?
+           WHERE embedding_generation_id = ? AND status IN ('running', 'failed')`,
+        )
+        .run(timestamp, id);
+      this.database
+        .prepare(
+          `UPDATE embedding_index_generations
+           SET status = 'running', is_current = 1, error = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(timestamp, id);
+    });
+    prepare.immediate();
+    const progress = this.embeddingGenerationProgress(profile);
+    if (!progress) throw new Error('Embedding generation was not created');
+    return progress;
+  }
+
+  public finishEmbeddingGeneration(profile: EmbeddingIndexProfile): EmbeddingGenerationProgress {
+    const id = embeddingProfileId(profile);
+    const progress = this.embeddingGenerationProgress(profile);
+    if (!progress) throw new Error('Embedding generation not found');
+    if (!progress.isCurrent) {
+      throw new Error('Embedding generation was superseded before it could be finalized');
+    }
+    const timestamp = now();
+    if (progress.pending === 0 && progress.running === 0 && progress.failed === 0) {
+      this.database
+        .prepare(
+          `UPDATE embedding_index_generations
+           SET status = 'complete', completed_at = ?, error = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(timestamp, timestamp, id);
+    } else {
+      this.database
+        .prepare(
+          `UPDATE embedding_index_generations
+           SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          `${String(progress.pending + progress.running + progress.failed)} revisions remain incomplete`,
+          timestamp,
+          id,
+        );
+    }
+    const finalProgress = this.embeddingGenerationProgress(profile);
+    if (!finalProgress) throw new Error('Embedding generation disappeared while finalizing');
+    return finalProgress;
+  }
+
+  public finishReadyEmbeddingGenerations(): number {
+    const timestamp = now();
+    return this.database
+      .prepare(
+        `UPDATE embedding_index_generations AS generation
+         SET status = 'complete', completed_at = ?, error = NULL, updated_at = ?
+         WHERE status = 'running' AND is_current = 1
+           AND EXISTS (
+             SELECT 1 FROM index_jobs job WHERE job.embedding_generation_id = generation.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM index_jobs job
+             WHERE job.embedding_generation_id = generation.id AND job.status != 'complete'
+           )`,
+      )
+      .run(timestamp, timestamp).changes;
   }
 
   public queueAllCurrentForReindex(): number {

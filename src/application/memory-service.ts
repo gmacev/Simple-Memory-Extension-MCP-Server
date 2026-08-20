@@ -18,7 +18,11 @@ import type { Indexer } from '../indexing/indexer.js';
 import type { Logger } from '../logger.js';
 import type { ModelClient } from '../models/model-client.js';
 import type { SearchEngine } from '../retrieval/search-engine.js';
-import type { MemoryStore } from '../storage/memory-store.js';
+import type {
+  EmbeddingGenerationProgress,
+  EmbeddingIndexProfile,
+  MemoryStore,
+} from '../storage/memory-store.js';
 
 const traversalCursorSchema = z.object({
   offset: z.number().int().min(1).max(10_000),
@@ -408,8 +412,27 @@ export class MemoryService {
     return result;
   }
 
-  public reindexPending(createdBefore?: string): ReturnType<Indexer['indexPending']> {
-    return this.indexer.indexPending(createdBefore);
+  public async reindexPending(createdBefore?: string): ReturnType<Indexer['indexPending']> {
+    const ordinary = await this.indexer.indexPending(createdBefore, {
+      includeEmbeddingGenerations: false,
+    });
+    const configuredGeneration = this.store.embeddingGenerationProgress(
+      this.configuredEmbeddingProfile(),
+    );
+    const recovered =
+      this.config.modelsEnabled &&
+      configuredGeneration?.isCurrent === true &&
+      configuredGeneration.status === 'running'
+        ? await this.indexer.indexPending(createdBefore, {
+            embeddingGenerationId: configuredGeneration.id,
+          })
+        : { indexed: 0, failed: 0 };
+    const result = {
+      indexed: ordinary.indexed + recovered.indexed,
+      failed: ordinary.failed + recovered.failed,
+    };
+    this.store.finishReadyEmbeddingGenerations();
+    return result;
   }
 
   public migrationStatus(): ReturnType<MemoryStore['migrationStatus']> {
@@ -421,11 +444,101 @@ export class MemoryService {
     return { queued, ...(await this.indexer.indexPending()) };
   }
 
+  private configuredEmbeddingProfile(): EmbeddingIndexProfile {
+    return {
+      provider: 'huggingface',
+      model: this.config.embeddingModel,
+      modelRevision: this.config.embeddingRevision,
+      dimensions: this.config.embeddingDimension,
+      instructionHash: createHash('sha256').update(this.config.queryInstruction).digest('hex'),
+    };
+  }
+
+  public async upgradeEmbeddingIndex(
+    reportProgress: (message: string) => void = () => undefined,
+  ): Promise<{
+    required: boolean;
+    indexed: number;
+    failed: number;
+    generation: EmbeddingGenerationProgress;
+  }> {
+    const configuredProfile = this.configuredEmbeddingProfile();
+    const existing = this.store.embeddingGenerationProgress(configuredProfile);
+    if (existing?.status === 'complete' && existing.isCurrent) {
+      reportProgress('Semantic index already matches the configured embedding model; skipping rebuild');
+      return { required: false, indexed: 0, failed: 0, generation: existing };
+    }
+
+    const revisionCount = this.store.retainedRevisionCount();
+    if (!this.config.modelsEnabled && revisionCount > 0) {
+      throw new Error(
+        'The existing database requires a semantic index upgrade. Rerun npm run update without --skip-models before restarting MCP clients.',
+      );
+    }
+
+    if (this.config.modelsEnabled) {
+      reportProgress('Validating the configured embedding model before changing the semantic index');
+      const vector = await this.models.embedQuery('Simple Memory embedding migration readiness');
+      const actual = await this.models.embeddingProfile();
+      if (
+        vector.length !== configuredProfile.dimensions ||
+        actual.embedding_dimension !== configuredProfile.dimensions ||
+        actual.embedding_model !== configuredProfile.model ||
+        actual.embedding_revision !== configuredProfile.modelRevision ||
+        actual.query_instruction_hash !== configuredProfile.instructionHash
+      ) {
+        throw new Error(
+          `Configured embedding profile does not match the loaded model: expected ${configuredProfile.model}@${configuredProfile.modelRevision} (${String(configuredProfile.dimensions)} dimensions)`,
+        );
+      }
+    }
+
+    const prepared = this.store.prepareEmbeddingGeneration(configuredProfile);
+    reportProgress(
+      prepared.total === 0
+        ? 'Semantic index is empty; recording the new embedding generation'
+        : `One-time semantic index upgrade: ${String(prepared.total)} revisions require ${configuredProfile.model} embeddings`,
+    );
+    let lastReported = -1;
+    const result = this.config.modelsEnabled
+      ? await this.indexer.indexPending(undefined, {
+          embeddingGenerationId: prepared.id,
+          onProgress: (indexed, failed) => {
+            const completed = prepared.completed + indexed;
+            const processed = completed + failed;
+            if (processed === prepared.total || processed - lastReported >= 10) {
+              lastReported = processed;
+              reportProgress(
+                `Re-embedding revisions: ${String(completed)}/${String(prepared.total)} complete, ${String(failed)} failed`,
+              );
+            }
+          },
+        })
+      : { indexed: 0, failed: 0 };
+    const generation = this.store.finishEmbeddingGeneration(configuredProfile);
+    if (generation.status !== 'complete') {
+      throw new Error(
+        `Semantic index upgrade remains incomplete (${String(generation.failed)} failed, ${String(generation.pending + generation.running)} pending). Rerun npm run update to resume.`,
+      );
+    }
+    reportProgress('Semantic index upgrade complete; future updates will reuse this generation');
+    return { required: true, ...result, generation };
+  }
+
   public async warmModels(
     reportProgress: (message: string) => void = () => undefined,
   ): Promise<Record<string, unknown>> {
     reportProgress('Loading the embedding model; missing files will be downloaded');
     const embedding = await this.models.embedQuery('Simple Memory model readiness probe');
+    const embeddingProfile = await this.models.embeddingProfile();
+    if (
+      embedding.length !== this.config.embeddingDimension ||
+      embeddingProfile.embedding_dimension !== this.config.embeddingDimension
+    ) {
+      throw new Error(
+        `Embedding model returned ${String(embedding.length)} dimensions; configured dimension is ${String(this.config.embeddingDimension)}`,
+      );
+    }
     reportProgress(`Embedding model ready (${String(embedding.length)} dimensions)`);
     reportProgress('Loading the reranker model; missing files will be downloaded');
     const reranker = await this.models.rerank('memory readiness', [

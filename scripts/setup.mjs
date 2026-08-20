@@ -342,17 +342,6 @@ async function main() {
       retryDelay: 250,
     });
     run('Build the MCP server', npmCommand, npmArguments(['run', 'build']));
-    run(
-      'Apply pending memory database migrations',
-      process.execPath,
-      [path.join(root, 'dist', 'cli.js'), 'migrate'],
-      {
-        env: {
-          ...process.env,
-          SIMPLE_MEMORY_MODELS: 'disabled',
-        },
-      },
-    );
     if (skipModels) {
       heading('Skipping model prefetch because --skip-models was supplied');
     } else {
@@ -364,12 +353,23 @@ async function main() {
         SIMPLE_MEMORY_LOCAL_FILES_ONLY: 'false',
       };
       run(
-        'Prepare and verify pinned Qwen models (cached files are reused)',
+        'Prepare and verify pinned embedding and reranking models (cached files are reused)',
         process.execPath,
         modelCommand,
         { env: modelEnvironment },
       );
     }
+    run(
+      'Apply migrations and upgrade the semantic index when required',
+      process.execPath,
+      [path.join(root, 'dist', 'cli.js'), 'embedding', 'upgrade'],
+      {
+        env: {
+          ...process.env,
+          SIMPLE_MEMORY_MODELS: skipModels ? 'disabled' : 'enabled',
+        },
+      },
+    );
     run(
       'Run final environment doctor',
       process.execPath,

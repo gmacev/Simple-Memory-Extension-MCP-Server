@@ -20,10 +20,10 @@ Memories stay local and persistent. Agents can search, revise, connect, archive,
 
 Simple Memory uses two local models:
 
-- **Qwen3-Embedding-0.6B** converts memories and queries into vectors for multilingual semantic retrieval.
+- **F2LLM-v2-330M** converts memories and queries into vectors for fast multilingual semantic retrieval.
 - **Qwen3-Reranker-0.6B** reviews the best candidates and improves their final ordering.
 
-They were selected because they provide strong multilingual retrieval in a relatively small size that remains practical to run locally. Inference automatically prefers a supported GPU and falls back to CPU.
+They were selected to combine a smaller, faster embedding model with strong final reranking while remaining practical to run locally. Inference automatically prefers a supported GPU and falls back to CPU.
 
 ## Where is memory stored?
 
@@ -72,6 +72,8 @@ npm run update
 ```
 
 Restart the MCP client afterward.
+
+When the configured embedding model changes, update rebuilds the semantic index once and shows its progress. Memory content and history are preserved, interrupted rebuilds resume on the next update, and later updates reuse the completed index generation.
 
 ## Connect your agent
 
@@ -262,11 +264,11 @@ Use `oauth` when a shared HTTP server serves separate users or agents. Your iden
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `SIMPLE_MEMORY_EMBEDDING_MODEL` | Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
+| `SIMPLE_MEMORY_EMBEDDING_MODEL` | Embedding model | `codefuse-ai/F2LLM-v2-330M` |
 | `SIMPLE_MEMORY_EMBEDDING_REVISION` | Embedding model revision | Built-in pinned revision |
 | `SIMPLE_MEMORY_RERANKER_MODEL` | Reranking model | `Qwen/Qwen3-Reranker-0.6B` |
 | `SIMPLE_MEMORY_RERANKER_REVISION` | Reranking model revision | Built-in pinned revision |
-| `SIMPLE_MEMORY_EMBEDDING_DIMENSION` | Stored vector dimensions | `1024` |
+| `SIMPLE_MEMORY_EMBEDDING_DIMENSION` | Stored vector dimensions | `896` |
 | `SIMPLE_MEMORY_QUERY_INSTRUCTION` | Embedding retrieval instruction | Built-in generic instruction |
 | `SIMPLE_MEMORY_RERANK_INSTRUCTION` | Reranking instruction | Built-in generic instruction |
 | `SIMPLE_MEMORY_EMBED_BATCH_SIZE` | Embedding batch size | `8` |
@@ -276,6 +278,8 @@ Use `oauth` when a shared HTTP server serves separate users or agents. Your iden
 | `SIMPLE_MEMORY_RERANK_CANDIDATES` | Maximum candidates sent to the reranker | `30` |
 
 Concurrent model work is bounded, batched where compatible, and fairly interleaved so searches and indexing share one local worker without unbounded waiting.
+
+Changing the embedding model, revision, dimensions, or query instruction causes the next normal update to create one new semantic-index generation. Unchanged configurations are reused.
 
 ### Setup and Python
 

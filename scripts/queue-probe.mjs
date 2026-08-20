@@ -30,7 +30,10 @@ function run() {
       content: 'This pending revision exists only to test atomic queue leases.',
     });
     const claimedByFirst = first.claimNextPendingRevision();
-    assert(claimedByFirst === memory.currentRevisionId, 'first connection should claim the job');
+    assert(
+      claimedByFirst?.revisionId === memory.currentRevisionId,
+      'first connection should claim the job',
+    );
     assert(
       second.claimNextPendingRevision() === null,
       'second connection must not steal a live job',
@@ -52,10 +55,13 @@ function run() {
     third = new MemoryStore(config, logger);
     const recovered = third.claimNextPendingRevision();
     assert(
-      recovered === memory.currentRevisionId,
+      recovered?.revisionId === memory.currentRevisionId,
       'stale running job should be recovered and claimed',
     );
-    third.markIndexStatus(recovered, 'lexical-only');
+    third.markIndexStatus(recovered.revisionId, 'lexical-only', undefined, {
+      id: recovered.id,
+      status: 'complete',
+    });
     assert(third.claimNextPendingRevision() === null, 'completed job must leave no pending work');
     assert(
       third.queueAllCurrentForReindex() === 1,
@@ -67,7 +73,7 @@ function run() {
     );
     const explicitClaim = third.claimNextPendingRevision();
     assert(
-      explicitClaim === memory.currentRevisionId,
+      explicitClaim?.revisionId === memory.currentRevisionId,
       'explicitly queued revision should be claimable',
     );
 

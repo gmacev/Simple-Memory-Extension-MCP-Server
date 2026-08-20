@@ -37,7 +37,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const showsModelProgress =
     (command === 'doctor' && config.modelsEnabled) ||
-    (command === 'model' && subcommand === 'fetch');
+    (command === 'model' && subcommand === 'fetch') ||
+    (command === 'embedding' && subcommand === 'upgrade' && config.modelsEnabled);
   const service = createMemoryService(config, { forwardModelStderr: showsModelProgress });
   try {
     if (command === 'doctor') {
@@ -55,13 +56,17 @@ async function main(): Promise<void> {
       return;
     }
     if (command === 'model' && subcommand === 'fetch') {
-      print(
-        await withModelProgress((reportProgress) => service.warmModels(reportProgress)),
-      );
+      print(await withModelProgress((reportProgress) => service.warmModels(reportProgress)));
       return;
     }
     if (command === 'migrate') {
       print(service.migrationStatus());
+      return;
+    }
+    if (command === 'embedding' && subcommand === 'upgrade') {
+      print(
+        await withModelProgress((reportProgress) => service.upgradeEmbeddingIndex(reportProgress)),
+      );
       return;
     }
     if (command === 'reindex') {
@@ -84,7 +89,7 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error(
-      'Usage: memoryctl doctor | model fetch | migrate | reindex | export [file] | compact | purge --deleted',
+      'Usage: memoryctl doctor | model fetch | embedding upgrade | migrate | reindex | export [file] | compact | purge --deleted',
     );
   } finally {
     await service.close();

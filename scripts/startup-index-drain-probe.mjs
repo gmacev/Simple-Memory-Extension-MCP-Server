@@ -35,7 +35,7 @@ async function run() {
       content: 'This revision should be indexed automatically after its stale lease is recovered.',
     });
     assert(
-      crashedStore.claimNextPendingRevision() === recoveredMemory.currentRevisionId,
+      crashedStore.claimNextPendingRevision()?.revisionId === recoveredMemory.currentRevisionId,
       'the simulated crashed worker should claim the original job',
     );
     crashedStore.close();

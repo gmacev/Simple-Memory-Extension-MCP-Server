@@ -28,6 +28,22 @@ def _require_strings(payload: dict[str, Any], key: str) -> list[str]:
     return value
 
 
+def _require_pairs(payload: dict[str, Any], key: str) -> list[tuple[str, str]]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be an array of query/document objects")
+    pairs: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"query", "document"}:
+            raise ValueError(f"{key} must contain only query/document objects")
+        query = item.get("query")
+        document = item.get("document")
+        if not isinstance(query, str) or not query or not isinstance(document, str):
+            raise ValueError(f"{key} entries require a non-empty query and string document")
+        pairs.append((query, document))
+    return pairs
+
+
 def _handle(runtime: ModelRuntime, payload: dict[str, Any]) -> object:
     operation = _require_string(payload, "operation")
     if operation == "health":
@@ -36,6 +52,8 @@ def _handle(runtime: ModelRuntime, payload: dict[str, Any]) -> object:
         return runtime.model_info()
     if operation == "embed_documents":
         return {"vectors": runtime.embed_documents(_require_strings(payload, "texts"))}
+    if operation == "embed_queries":
+        return {"vectors": runtime.embed_queries(_require_strings(payload, "texts"))}
     if operation == "count_tokens":
         return {"counts": runtime.count_tokens(_require_strings(payload, "texts"))}
     if operation == "embed_query":
@@ -46,6 +64,8 @@ def _handle(runtime: ModelRuntime, payload: dict[str, Any]) -> object:
                 _require_string(payload, "query"), _require_strings(payload, "documents")
             )
         }
+    if operation == "rerank_pairs":
+        return {"scores": runtime.rerank_pairs(_require_pairs(payload, "pairs"))}
     if operation == "shutdown":
         return {"status": "shutting_down"}
     raise ValueError(f"Unknown operation: {operation}")

@@ -258,6 +258,39 @@ const modelHealthOutputSchema = z
   })
   .strict();
 
+const inferenceLaneStatusOutputSchema = z
+  .object({
+    queued: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    meanQueueMs: z.number().nonnegative(),
+    meanExecutionMs: z.number().nonnegative(),
+  })
+  .strict();
+
+const inferenceSchedulerOutputSchema = z
+  .object({
+    queueDepth: z.number().int().nonnegative(),
+    queueLimit: z.number().int().positive(),
+    inFlight: z.boolean(),
+    counters: z
+      .object({
+        completed: z.number().int().nonnegative(),
+        rejected: z.number().int().nonnegative(),
+        queueTimeouts: z.number().int().nonnegative(),
+        executionTimeouts: z.number().int().nonnegative(),
+        dispatchedBatches: z.number().int().nonnegative(),
+      })
+      .strict(),
+    lanes: z
+      .object({
+        query: inferenceLaneStatusOutputSchema,
+        ingestion: inferenceLaneStatusOutputSchema,
+        rerank: inferenceLaneStatusOutputSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const toolOutputSchemas = {
   space_create: z.object({ id: z.string(), createdAt: isoDateTimeSchema }).strict(),
   space_list: z
@@ -370,6 +403,7 @@ export const toolOutputSchemas = {
       modelLauncherPid: z.number().int().nullable().optional(),
       modelWorkerPid: z.number().int().nullable().optional(),
       modelWorkerStarts: z.number().int().nonnegative().optional(),
+      inferenceScheduler: inferenceSchedulerOutputSchema.optional(),
       modelHealth: modelHealthOutputSchema.optional(),
       modelError: z.string().optional(),
     })

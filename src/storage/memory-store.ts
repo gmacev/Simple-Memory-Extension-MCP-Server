@@ -1963,11 +1963,13 @@ export class MemoryStore {
       .run(now(), revisionId);
   }
 
-  public claimNextPendingRevision(): string | null {
+  public claimNextPendingRevision(createdBefore?: string): string | null {
     const transaction = this.database.transaction(() => {
       const job = this.getRow(
         `SELECT id, revision_id FROM index_jobs
-         WHERE status = 'pending' ORDER BY created_at, id LIMIT 1`,
+         WHERE status = 'pending'${createdBefore ? ' AND created_at <= ?' : ''}
+         ORDER BY created_at, id LIMIT 1`,
+        ...(createdBefore ? [createdBefore] : []),
       );
       if (!job) return null;
       const claimed = this.database

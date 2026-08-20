@@ -189,6 +189,23 @@ class ModelRuntime:
         )
         return vectors.astype("float32", copy=False).tolist()
 
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self.embed_query(texts[0])]
+        model = self._get_embedding()
+        prompt = f"Instruct: {self.config.query_instruction}\nQuery: "
+        vectors = model.encode(
+            texts,
+            prompt=prompt,
+            batch_size=self.config.embedding_batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return vectors.astype("float32", copy=False).tolist()
+
     def embed_query(self, text: str) -> list[float]:
         model = self._get_embedding()
         prompt = f"Instruct: {self.config.query_instruction}\nQuery: "
@@ -202,11 +219,10 @@ class ModelRuntime:
         )[0]
         return vector.astype("float32", copy=False).tolist()
 
-    def rerank(self, query: str, documents: list[str]) -> list[float]:
-        if not documents:
+    def rerank_pairs(self, pairs: list[tuple[str, str]]) -> list[float]:
+        if not pairs:
             return []
         model = self._get_reranker()
-        pairs = [(query, document) for document in documents]
         scores = model.predict(
             pairs,
             batch_size=self.config.rerank_batch_size,
@@ -215,6 +231,9 @@ class ModelRuntime:
         )
         raw_scores = scores.tolist() if hasattr(scores, "tolist") else list(scores)
         return [float(score[0] if isinstance(score, list) else score) for score in raw_scores]
+
+    def rerank(self, query: str, documents: list[str]) -> list[float]:
+        return self.rerank_pairs([(query, document) for document in documents])
 
     def model_info(self) -> dict[str, object]:
         embedding_dimension: int | None = None

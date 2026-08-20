@@ -221,7 +221,9 @@ All configuration is optional; the defaults are suitable for a normal local inst
 | `SIMPLE_MEMORY_DEVICE` | Runtime device such as `cuda`, `xpu`, `mps`, or `cpu` | `auto` |
 | `SIMPLE_MEMORY_LOCAL_FILES_ONLY` | Prevent model downloads and use the local cache only | `false` |
 | `SIMPLE_MEMORY_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
-| `SIMPLE_MEMORY_MODEL_TIMEOUT_MS` | Model request timeout | `600000` |
+| `SIMPLE_MEMORY_MODEL_TIMEOUT_MS` | Model execution timeout after work reaches the worker | `600000` |
+| `SIMPLE_MEMORY_INFERENCE_QUEUE_LIMIT` | Maximum queued and running model operations | `128` |
+| `SIMPLE_MEMORY_INFERENCE_QUEUE_TIMEOUT_MS` | Maximum wait before queued model work degrades gracefully | `30000` |
 
 ### Transport
 
@@ -272,6 +274,8 @@ Use `oauth` when a shared HTTP server serves separate users or agents. Your iden
 | `SIMPLE_MEMORY_LEXICAL_CANDIDATES` | Lexical candidates considered | `100` |
 | `SIMPLE_MEMORY_SEMANTIC_CANDIDATES` | Semantic candidates considered | `100` |
 | `SIMPLE_MEMORY_RERANK_CANDIDATES` | Maximum candidates sent to the reranker | `30` |
+
+Concurrent model work is bounded, batched where compatible, and fairly interleaved so searches and indexing share one local worker without unbounded waiting.
 
 ### Setup and Python
 

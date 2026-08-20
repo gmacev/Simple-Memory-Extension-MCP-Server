@@ -130,11 +130,11 @@ export class Indexer {
     return this.store.getMemory(record.id);
   }
 
-  public async indexPending(): Promise<{ indexed: number; failed: number }> {
+  public async indexPending(createdBefore?: string): Promise<{ indexed: number; failed: number }> {
     let indexed = 0;
     let failed = 0;
     while (true) {
-      const revisionId = this.store.claimNextPendingRevision();
+      const revisionId = this.store.claimNextPendingRevision(createdBefore);
       if (!revisionId) break;
       try {
         await this.indexRevision(revisionId, true);

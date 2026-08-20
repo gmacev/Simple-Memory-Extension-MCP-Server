@@ -1,10 +1,7 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  type AccessConfiguration,
-  parseFixedAccess,
-} from './access/authorization.js';
+import { type AccessConfiguration, parseFixedAccess } from './access/authorization.js';
 
 export interface AppConfig {
   dataDir: string;
@@ -13,7 +10,11 @@ export interface AppConfig {
   pythonExecutablePath: string;
   modelsEnabled: boolean;
   embeddingDimension: number;
+  embeddingBatchSize: number;
+  rerankBatchSize: number;
   modelTimeoutMs: number;
+  inferenceQueueLimit: number;
+  inferenceQueueTimeoutMs: number;
   rerankCandidates: number;
   lexicalCandidates: number;
   semanticCandidates: number;
@@ -72,7 +73,8 @@ function accessConfiguration(): AccessConfiguration {
   const mode = configuredMode;
   const access: AccessConfiguration = {
     mode,
-    oauthAccessClaim: process.env.SIMPLE_MEMORY_OAUTH_ACCESS_CLAIM?.trim() || 'simple_memory_access',
+    oauthAccessClaim:
+      process.env.SIMPLE_MEMORY_OAUTH_ACCESS_CLAIM?.trim() || 'simple_memory_access',
     allowUnauthenticatedNonLoopback: booleanEnvironment(
       'SIMPLE_MEMORY_HTTP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK',
       false,
@@ -123,7 +125,11 @@ export function loadConfig(): AppConfig {
     ),
     modelsEnabled: process.env.SIMPLE_MEMORY_MODELS !== 'disabled',
     embeddingDimension: integerEnvironment('SIMPLE_MEMORY_EMBEDDING_DIMENSION', 1024),
+    embeddingBatchSize: integerEnvironment('SIMPLE_MEMORY_EMBED_BATCH_SIZE', 8),
+    rerankBatchSize: integerEnvironment('SIMPLE_MEMORY_RERANK_BATCH_SIZE', 4),
     modelTimeoutMs: integerEnvironment('SIMPLE_MEMORY_MODEL_TIMEOUT_MS', 600_000),
+    inferenceQueueLimit: integerEnvironment('SIMPLE_MEMORY_INFERENCE_QUEUE_LIMIT', 128),
+    inferenceQueueTimeoutMs: integerEnvironment('SIMPLE_MEMORY_INFERENCE_QUEUE_TIMEOUT_MS', 30_000),
     rerankCandidates: integerEnvironment('SIMPLE_MEMORY_RERANK_CANDIDATES', 30),
     lexicalCandidates: integerEnvironment('SIMPLE_MEMORY_LEXICAL_CANDIDATES', 100),
     semanticCandidates: integerEnvironment('SIMPLE_MEMORY_SEMANTIC_CANDIDATES', 100),

@@ -22,7 +22,7 @@ function environment() {
 }
 
 const client = new Client(
-  { name: 'simple-memory-structured-output-probe', version: '3.3.0' },
+  { name: 'simple-memory-structured-output-probe', version: '3.4.0' },
   { versionNegotiation: { mode: 'auto', probe: { timeoutMs: 5_000 } } },
 );
 const transport = new StdioClientTransport({
@@ -78,6 +78,11 @@ try {
     includeDetails: true,
   });
   assert.equal(typeof detailedStatus.database, 'string', 'detailed status must retain database');
+  assert.equal(
+    detailedStatus.inferenceScheduler?.queueLimit,
+    128,
+    'detailed status must expose bounded inference scheduler diagnostics',
+  );
 
   const space = await call('space_create', {
     name: 'Structured output probe',

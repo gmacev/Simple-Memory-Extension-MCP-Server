@@ -401,14 +401,15 @@ export class MemoryService {
       modelLauncherPid: this.models.launcherPid,
       modelWorkerPid: this.models.workerPid,
       modelWorkerStarts: this.models.processStarts,
+      inferenceScheduler: this.models.schedulerStatus(),
     };
     if (modelHealth) result.modelHealth = modelHealth;
     if (modelError) result.modelError = modelError;
     return result;
   }
 
-  public async reindexPending(): Promise<ReturnType<Indexer['indexPending']>> {
-    return this.indexer.indexPending();
+  public reindexPending(createdBefore?: string): ReturnType<Indexer['indexPending']> {
+    return this.indexer.indexPending(createdBefore);
   }
 
   public migrationStatus(): ReturnType<MemoryStore['migrationStatus']> {

@@ -45,14 +45,8 @@ function decodeTraversalCursor(cursor: string): z.infer<typeof traversalCursorSc
   }
 }
 
-function encodeTraversalCursor(
-  offset: number,
-  atTime: string,
-  fingerprint: string,
-): string {
-  return Buffer.from(JSON.stringify({ offset, atTime, fingerprint }), 'utf8').toString(
-    'base64url',
-  );
+function encodeTraversalCursor(offset: number, atTime: string, fingerprint: string): string {
+  return Buffer.from(JSON.stringify({ offset, atTime, fingerprint }), 'utf8').toString('base64url');
 }
 
 function traversalFingerprint(options: {
@@ -224,7 +218,10 @@ export class MemoryService {
   public async traverse(options: MemoryTraversalOptions): Promise<MemoryTraversalPage> {
     const cursor = options.cursor ? decodeTraversalCursor(options.cursor) : undefined;
     const maxDepth = Math.max(0, Math.min(options.maxDepth ?? 2, 5));
-    const limit = Math.max(1, Math.min(options.limit ?? DEFAULT_TRAVERSAL_LIMIT, MAX_TRAVERSAL_LIMIT));
+    const limit = Math.max(
+      1,
+      Math.min(options.limit ?? DEFAULT_TRAVERSAL_LIMIT, MAX_TRAVERSAL_LIMIT),
+    );
     const relations = [
       ...new Set(
         (options.relations ?? [])
@@ -276,10 +273,11 @@ export class MemoryService {
         entry.relevanceScore = lexicalTraversalScore(query, entry);
       }
       const rerankSet = [...connected]
-        .sort((left, right) =>
-          (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0) ||
-          left.depth - right.depth ||
-          left.memory.id.localeCompare(right.memory.id),
+        .sort(
+          (left, right) =>
+            (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0) ||
+            left.depth - right.depth ||
+            left.memory.id.localeCompare(right.memory.id),
         )
         .slice(0, this.config.rerankCandidates);
       if (rerankSet.length > 0) {
@@ -328,9 +326,7 @@ export class MemoryService {
       (consumed < candidates.length || traversed.truncated);
     const page: MemoryTraversalPage = {
       items,
-      nextCursor: hasMore
-        ? encodeTraversalCursor(consumed, atTime, fingerprint)
-        : null,
+      nextCursor: hasMore ? encodeTraversalCursor(consumed, atTime, fingerprint) : null,
       truncated: hasMore || traversed.truncated || exceededRankedCandidateLimit,
       atTime,
       degraded,
@@ -439,6 +435,32 @@ export class MemoryService {
     return this.store.migrationStatus();
   }
 
+  public async readiness(): Promise<ReturnType<MemoryStore['readiness']>> {
+    const readiness = this.store.readiness(
+      this.config.modelsEnabled,
+      this.configuredEmbeddingProfile(),
+    );
+    if (!readiness.ready || !this.config.modelsEnabled) return readiness;
+
+    try {
+      const health = await this.models.health();
+      if (health.status !== 'ok' || !health.embedding_loaded || !health.reranker_loaded) {
+        return {
+          ...readiness,
+          ready: false,
+          reasons: [...readiness.reasons, 'model worker is not ready'],
+        };
+      }
+    } catch {
+      return {
+        ...readiness,
+        ready: false,
+        reasons: [...readiness.reasons, 'model worker is unavailable'],
+      };
+    }
+    return readiness;
+  }
+
   public async reindexAll(): Promise<{ queued: number; indexed: number; failed: number }> {
     const queued = this.store.queueAllCurrentForReindex();
     return { queued, ...(await this.indexer.indexPending()) };
@@ -465,7 +487,9 @@ export class MemoryService {
     const configuredProfile = this.configuredEmbeddingProfile();
     const existing = this.store.embeddingGenerationProgress(configuredProfile);
     if (existing?.status === 'complete' && existing.isCurrent) {
-      reportProgress('Semantic index already matches the configured embedding model; skipping rebuild');
+      reportProgress(
+        'Semantic index already matches the configured embedding model; skipping rebuild',
+      );
       return { required: false, indexed: 0, failed: 0, generation: existing };
     }
 
@@ -477,7 +501,9 @@ export class MemoryService {
     }
 
     if (this.config.modelsEnabled) {
-      reportProgress('Validating the configured embedding model before changing the semantic index');
+      reportProgress(
+        'Validating the configured embedding model before changing the semantic index',
+      );
       const vector = await this.models.embedQuery('Simple Memory embedding migration readiness');
       const actual = await this.models.embeddingProfile();
       if (

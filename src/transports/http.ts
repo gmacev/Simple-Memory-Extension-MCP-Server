@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http';
 import {
   createMcpExpressApp,
   getOAuthProtectedResourceMetadataUrl,
@@ -7,11 +8,10 @@ import {
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import type { RequestHandler } from 'express';
-import type { Server as HttpServer } from 'node:http';
 import {
-  memoryScopes,
-  type MemoryScope,
   type AuthorizationService,
+  type MemoryScope,
+  memoryScopes,
   type SpaceAccessLevel,
 } from '../access/authorization.js';
 import { createOAuthRuntime } from '../access/oauth.js';
@@ -19,6 +19,7 @@ import type { MemoryService } from '../application/memory-service.js';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
 import { buildMcpServer, mcpToolAccessLevels } from '../mcp/server.js';
+import { SIMPLE_MEMORY_VERSION } from '../version.js';
 
 export interface HttpServerHandle {
   close(): Promise<void>;
@@ -69,8 +70,7 @@ function urlHost(host: string): string {
   return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
 }
 
-function allowedOrigins(host: string, port: number): string[] {
-  const configured = process.env.SIMPLE_MEMORY_HTTP_ALLOWED_ORIGINS;
+function allowedOrigins(host: string, port: number, configured: string | undefined): string[] {
   if (configured !== undefined) {
     const origins = [
       ...new Set(
@@ -151,12 +151,12 @@ export async function startHttpServer(
   authorization: AuthorizationService,
   logger: Logger,
 ): Promise<HttpServerHandle> {
-  const host = process.env.SIMPLE_MEMORY_HTTP_HOST ?? '127.0.0.1';
-  const port = Number.parseInt(process.env.SIMPLE_MEMORY_HTTP_PORT ?? '3000', 10);
+  const host = config.httpHost;
+  const port = config.httpPort;
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error('SIMPLE_MEMORY_HTTP_PORT must be an integer from 1 to 65535');
   }
-  const origins = allowedOrigins(host, port);
+  const origins = allowedOrigins(host, port, config.httpAllowedOrigins);
   if (
     config.access.mode === 'open' &&
     !isLoopback(host) &&
@@ -174,6 +174,20 @@ export async function startHttpServer(
     host,
     allowedOrigins: [...new Set(origins.map((origin) => new URL(origin).hostname))],
     jsonLimit: '2mb',
+  });
+  app.get('/healthz', (_request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(200).json({ status: 'ok', version: SIMPLE_MEMORY_VERSION });
+  });
+  app.get('/readyz', async (_request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    try {
+      const readiness = await service.readiness();
+      response.status(readiness.ready ? 200 : 503).json(readiness);
+    } catch (error) {
+      logger.warn('Readiness check failed', { error: String(error) });
+      response.status(503).json({ ready: false, reasons: ['database unavailable'] });
+    }
   });
   app.use((request, response, next) => {
     const origin = request.headers.origin;
@@ -199,10 +213,7 @@ export async function startHttpServer(
     if (publicUrl.pathname !== '/mcp') {
       throw new Error('SIMPLE_MEMORY_HTTP_PUBLIC_URL must identify the /mcp endpoint');
     }
-    const issuer = requireSecureRemoteUrl(
-      config.access.oauthIssuer,
-      'SIMPLE_MEMORY_OAUTH_ISSUER',
-    );
+    const issuer = requireSecureRemoteUrl(config.access.oauthIssuer, 'SIMPLE_MEMORY_OAUTH_ISSUER');
     const oauth = await createOAuthRuntime(config.access);
     const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicUrl);
     app.use(
@@ -235,8 +246,7 @@ export async function startHttpServer(
   }
 
   const handler = createMcpHandler(
-    ({ authInfo }) =>
-      buildMcpServer(service, authorization, authorization.context(authInfo)),
+    ({ authInfo }) => buildMcpServer(service, authorization, authorization.context(authInfo)),
     {
       legacy: 'stateless',
       responseMode: 'auto',

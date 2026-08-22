@@ -77,7 +77,21 @@ export class ModelWorkerTransport implements InferenceWorkerTransport {
 
     const child = spawn(this.config.pythonExecutablePath, ['-m', 'simple_memory_models.worker'], {
       cwd: this.config.pythonProjectPath,
-      env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        PYTHONUTF8: '1',
+        SIMPLE_MEMORY_DEVICE: this.config.device,
+        SIMPLE_MEMORY_LOCAL_FILES_ONLY: String(this.config.localFilesOnly),
+        SIMPLE_MEMORY_EMBEDDING_MODEL: this.config.embeddingModel,
+        SIMPLE_MEMORY_EMBEDDING_REVISION: this.config.embeddingRevision,
+        SIMPLE_MEMORY_RERANKER_MODEL: this.config.rerankerModel,
+        SIMPLE_MEMORY_RERANKER_REVISION: this.config.rerankerRevision,
+        SIMPLE_MEMORY_QUERY_INSTRUCTION: this.config.queryInstruction,
+        SIMPLE_MEMORY_RERANK_INSTRUCTION: this.config.rerankInstruction,
+        SIMPLE_MEMORY_EMBED_BATCH_SIZE: String(this.config.embeddingBatchSize),
+        SIMPLE_MEMORY_RERANK_BATCH_SIZE: String(this.config.rerankBatchSize),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });

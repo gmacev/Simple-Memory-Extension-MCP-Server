@@ -1,6 +1,6 @@
 import {
-  discoverAuthorizationServerMetadata,
   type AuthorizationServerMetadata,
+  discoverAuthorizationServerMetadata,
 } from '@modelcontextprotocol/client';
 import {
   type AuthInfo,
@@ -8,7 +8,7 @@ import {
   OAuthErrorCode,
   type OAuthTokenVerifier,
 } from '@modelcontextprotocol/server';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, type JWTPayload, jwtVerify } from 'jose';
 import * as z from 'zod/v4';
 import type { AccessConfiguration, OAuthAccessContext } from './authorization.js';
 import {
@@ -38,7 +38,9 @@ function tokenScopes(payload: JWTPayload): string[] {
   const scp = payload.scp;
   const values = [
     ...(typeof scope === 'string' ? scope.split(/\s+/u) : []),
-    ...(Array.isArray(scp) ? scp.filter((value): value is string => typeof value === 'string') : []),
+    ...(Array.isArray(scp)
+      ? scp.filter((value): value is string => typeof value === 'string')
+      : []),
   ];
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

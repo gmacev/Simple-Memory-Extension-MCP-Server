@@ -59,13 +59,14 @@ function checksum(sql: string): string {
 
 function tableExists(database: Database.Database, name: string): boolean {
   return (
-    database
-      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(name) !== undefined
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !==
+    undefined
   );
 }
 
-function appliedMigrations(database: Database.Database): Map<number, z.infer<typeof migrationRowSchema>> {
+function appliedMigrations(
+  database: Database.Database,
+): Map<number, z.infer<typeof migrationRowSchema>> {
   if (!tableExists(database, 'schema_migrations')) return new Map();
   const rows = z
     .array(migrationRowSchema)
@@ -73,9 +74,7 @@ function appliedMigrations(database: Database.Database): Map<number, z.infer<typ
   return new Map(rows.map((row) => [row.version, row]));
 }
 
-function validateAppliedMigrations(
-  applied: Map<number, z.infer<typeof migrationRowSchema>>,
-): void {
+function validateAppliedMigrations(applied: Map<number, z.infer<typeof migrationRowSchema>>): void {
   const known = new Map(migrations.map((migration) => [migration.version, migration]));
   for (const row of applied.values()) {
     const migration = known.get(row.version);

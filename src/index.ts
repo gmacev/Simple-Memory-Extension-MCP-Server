@@ -5,6 +5,7 @@ import { createMemoryService } from './application/create-service.js';
 import { loadConfig } from './config.js';
 import { Logger } from './logger.js';
 import { buildMcpServer } from './mcp/server.js';
+import { acquireDatabaseServerLease } from './operations/database-runtime.js';
 import { startHttpServer } from './transports/http.js';
 
 async function main(): Promise<void> {
@@ -12,7 +13,14 @@ async function main(): Promise<void> {
   const logger = new Logger(config.logLevel);
   const authorization = new AuthorizationService(config.access);
   const startupIndexCutoff = new Date().toISOString();
-  const service = createMemoryService(config);
+  const serverLease = await acquireDatabaseServerLease(config.databasePath);
+  let service: ReturnType<typeof createMemoryService>;
+  try {
+    service = createMemoryService(config);
+  } catch (error) {
+    await serverLease.release();
+    throw error;
+  }
   let closeTransport = async (): Promise<void> => {};
   let pendingIndexDrain = Promise.resolve();
   const startPendingIndexDrain = (): void => {
@@ -31,15 +39,22 @@ async function main(): Promise<void> {
   const close = async (): Promise<void> => {
     if (closing) return;
     closing = true;
-    await closeTransport();
-    await pendingIndexDrain;
-    await service.close();
+    try {
+      await closeTransport();
+      await pendingIndexDrain;
+    } finally {
+      try {
+        await service.close();
+      } finally {
+        await serverLease.release();
+      }
+    }
   };
   process.once('SIGINT', () => void close().finally(() => process.exit(0)));
   process.once('SIGTERM', () => void close().finally(() => process.exit(0)));
   process.once('beforeExit', () => void close());
 
-  if (process.env.SIMPLE_MEMORY_TRANSPORT === 'http') {
+  if (config.transport === 'http') {
     if (config.access.mode === 'fixed') {
       throw new Error('SIMPLE_MEMORY_ACCESS_MODE=fixed is only supported with stdio transport');
     }
@@ -52,13 +67,10 @@ async function main(): Promise<void> {
     throw new Error('SIMPLE_MEMORY_ACCESS_MODE=oauth requires Streamable HTTP transport');
   }
   const accessContext = authorization.context();
-  const stdio = serveStdio(
-    () => buildMcpServer(service, authorization, accessContext),
-    {
-      legacy: 'serve',
-      onerror: (error) => logger.error('MCP stdio request failed', { error: error.message }),
-    },
-  );
+  const stdio = serveStdio(() => buildMcpServer(service, authorization, accessContext), {
+    legacy: 'serve',
+    onerror: (error) => logger.error('MCP stdio request failed', { error: error.message }),
+  });
   closeTransport = () => stdio.close();
   process.stdin.once('end', () => void close());
   logger.info('Simple Memory MCP listening on stdio');

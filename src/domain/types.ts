@@ -32,12 +32,7 @@ export type MemoryState = 'active' | 'archived' | 'deleted';
 export type IndexStatus = 'pending' | 'ready' | 'lexical-only' | 'failed';
 export type FeedbackScope = 'content' | 'retrieval';
 export type StoredFeedbackScope = FeedbackScope | 'legacy';
-export type ContentFeedbackSignal =
-  | 'verified'
-  | 'correct'
-  | 'incorrect'
-  | 'stale'
-  | 'contradicted';
+export type ContentFeedbackSignal = 'verified' | 'correct' | 'incorrect' | 'stale' | 'contradicted';
 export type RetrievalFeedbackSignal = 'relevant' | 'irrelevant' | 'helpful' | 'not_helpful';
 export type FeedbackSignal = ContentFeedbackSignal | RetrievalFeedbackSignal;
 export type FeedbackActorType = 'user' | 'agent' | 'system' | 'external';
@@ -147,8 +142,7 @@ export interface MemorySearchRevision extends MemorySummaryRevision {
   searchableText: string;
 }
 
-export interface MemorySearchRecord
-  extends Omit<MemorySummaryRecord, 'revision'> {
+export interface MemorySearchRecord extends Omit<MemorySummaryRecord, 'revision'> {
   revision: MemorySearchRevision;
 }
 

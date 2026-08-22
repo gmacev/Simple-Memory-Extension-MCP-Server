@@ -153,10 +153,7 @@ function rerankDocument(candidate: FusedCandidate & { record: MemorySearchRecord
     .map((source) => [source.label, source.type, source.uri].filter(Boolean).join(' | '))
     .filter(Boolean);
   if (sources.length > 0) context.push(`Sources: ${sources.join('; ')}`);
-  context.push(
-    'Matched evidence:',
-    ...candidate.rerankSegments.slice(0, RERANK_EVIDENCE_SEGMENTS),
-  );
+  context.push('Matched evidence:', ...candidate.rerankSegments.slice(0, RERANK_EVIDENCE_SEGMENTS));
   return context.join('\n').slice(0, RERANK_DOCUMENT_LIMIT);
 }
 
@@ -174,8 +171,7 @@ function autoSearchNeedsReranking(
   if (!first || !second) return false;
   if (isStrongExactMatch(first)) return false;
   if (!scoped) return true;
-  const retrievalChannelsAgree =
-    first.score.lexicalRank === 1 && first.score.semanticRank === 1;
+  const retrievalChannelsAgree = first.score.lexicalRank === 1 && first.score.semanticRank === 1;
   const hasClearLead = first.score.fusedScore >= second.score.fusedScore * AUTO_CLEAR_LEAD_RATIO;
   return !(retrievalChannelsAgree && hasClearLead);
 }
@@ -201,9 +197,7 @@ function pruneDecisiveRerankWinner(
   }, 0);
   const relevanceFloor = winnerScore * DECISIVE_RUNNER_UP_RATIO;
   if (strongestAlternative >= relevanceFloor) return ordered;
-  return ordered.filter(
-    (candidate, index) => index === 0 || isStrongExactMatch(candidate),
-  );
+  return ordered.filter((candidate, index) => index === 0 || isStrongExactMatch(candidate));
 }
 
 export class SearchEngine {
@@ -343,10 +337,7 @@ export class SearchEngine {
         this.config.modelsEnabled &&
         autoSearchNeedsReranking(ordered, options.spaceIds !== undefined));
     if (shouldRerank) {
-      const rerankSet = ordered.slice(
-        0,
-        rerankCandidateLimit(topK, this.config.rerankCandidates),
-      );
+      const rerankSet = ordered.slice(0, rerankCandidateLimit(topK, this.config.rerankCandidates));
       try {
         const scores = await this.models.rerank(
           options.query,

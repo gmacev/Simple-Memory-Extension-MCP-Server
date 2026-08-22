@@ -23,6 +23,9 @@ data/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+*.db.runtime/
+*.sqlite.runtime/
+*.sqlite3.runtime/
 *.log
 logs/
 

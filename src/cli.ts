@@ -2,7 +2,9 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createMemoryService } from './application/create-service.js';
-import { loadConfig } from './config.js';
+import { loadConfig, publicConfig } from './config.js';
+import { backupDatabase, restoreDatabase } from './operations/database-operations.js';
+import { SIMPLE_MEMORY_VERSION } from './version.js';
 
 function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -33,8 +35,57 @@ async function withModelProgress<T>(
 }
 
 async function main(): Promise<void> {
-  const [, , command = 'doctor', subcommand, argument] = process.argv;
+  const arguments_ = process.argv.slice(2);
+  const [command = 'doctor', subcommand, argument] = arguments_;
+  if (command === '--help' || command === '-h' || command === 'help') {
+    process.stdout.write(`Simple Memory administration CLI
+
+Usage:
+  memoryctl doctor
+  memoryctl config validate
+  memoryctl config show
+  memoryctl backup [file]
+  memoryctl restore <file> --confirm
+  memoryctl model fetch
+  memoryctl embedding upgrade
+  memoryctl migrate
+  memoryctl reindex
+  memoryctl export [file]
+  memoryctl compact
+  memoryctl purge --deleted
+  memoryctl --version
+`);
+    return;
+  }
+  if (command === '--version' || command === '-v') {
+    process.stdout.write(`${SIMPLE_MEMORY_VERSION}\n`);
+    return;
+  }
   const config = loadConfig();
+  if (command === 'config') {
+    if (subcommand === 'validate') {
+      print({ valid: true, version: SIMPLE_MEMORY_VERSION });
+      return;
+    }
+    if (subcommand === 'show') {
+      print(publicConfig(config));
+      return;
+    }
+    throw new Error('Usage: memoryctl config validate | config show');
+  }
+  if (command === 'backup') {
+    print(await backupDatabase(config.databasePath, subcommand && path.resolve(subcommand)));
+    return;
+  }
+  if (command === 'restore') {
+    if (!subcommand || !arguments_.includes('--confirm')) {
+      throw new Error(
+        'Usage: memoryctl restore <file> --confirm. Stop every Simple Memory process before restoring.',
+      );
+    }
+    print(await restoreDatabase(config, subcommand));
+    return;
+  }
   const showsModelProgress =
     (command === 'doctor' && config.modelsEnabled) ||
     (command === 'model' && subcommand === 'fetch') ||
@@ -88,9 +139,7 @@ async function main(): Promise<void> {
       print({ purged: service.purgeDeleted() });
       return;
     }
-    throw new Error(
-      'Usage: memoryctl doctor | model fetch | embedding upgrade | migrate | reindex | export [file] | compact | purge --deleted',
-    );
+    throw new Error('Unknown command. Run memoryctl --help for available commands.');
   } finally {
     await service.close();
   }

@@ -135,6 +135,15 @@ async function probeOpenLoopbackServer(port) {
   let client;
   try {
     await waitForListening(child);
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert(health.status === 200, 'liveness endpoint must return 200');
+    const healthBody = await health.json();
+    assert(healthBody.status === 'ok', 'liveness endpoint must report ok');
+    const readiness = await fetch(`http://127.0.0.1:${port}/readyz`);
+    assert(readiness.status === 200, 'ready server must return 200');
+    const readinessBody = await readiness.json();
+    assert(readinessBody.ready === true, 'readiness endpoint must report ready');
+    assert(readinessBody.database === 'ok', 'readiness endpoint must verify the database');
     const endpoint = new URL(`http://127.0.0.1:${port}/mcp`);
     const forbidden = await fetch(endpoint, {
       method: 'POST',
@@ -142,7 +151,7 @@ async function probeOpenLoopbackServer(port) {
     });
     assert(forbidden.status === 403, 'an unapproved Origin header must be rejected');
     client = new Client(
-      { name: 'simple-memory-http-open-probe', version: '3.5.0' },
+      { name: 'simple-memory-http-open-probe', version: '3.6.0' },
       { versionNegotiation: { mode: 'auto' } },
     );
     await client.connect(
@@ -190,6 +199,7 @@ async function run() {
   return {
     ok: true,
     openLoopback: true,
+    healthAndReadiness: true,
     originValidation: true,
     unauthenticatedNonLoopbackRefused: true,
     legacySharedTokenRefused: true,

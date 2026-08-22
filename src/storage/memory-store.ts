@@ -9,15 +9,16 @@ import { MemoryIdentityConflictError } from '../domain/errors.js';
 import { contentHash, parseJsonValue, stableStringify } from '../domain/json.js';
 import type {
   ContentFeedbackSignal,
-  FeedbackActorType,
   FeedbackStatus,
+  FeedbackSummary,
   IndexStatus,
   JsonObject,
+  LogicalMemoryResolution,
+  MemoryCreateInput,
   MemoryFeedback,
   MemoryFeedbackInput,
   MemoryFeedbackListFilters,
   MemoryFeedbackListPage,
-  MemoryCreateInput,
   MemoryHistoryPage,
   MemoryHistoryRevision,
   MemoryInput,
@@ -25,7 +26,6 @@ import type {
   MemoryLinkDirection,
   MemoryListFilters,
   MemoryListPage,
-  LogicalMemoryResolution,
   MemoryMergeInput,
   MemoryMergeResult,
   MemoryRecord,
@@ -37,13 +37,11 @@ import type {
   MemoryTraversalEntry,
   MemoryTraversalPathStep,
   SegmentRecord,
+  SourceInput,
   SpaceListFilters,
   SpaceListPage,
   SpaceRecord,
   SpaceState,
-  SourceInput,
-  StoredFeedbackScope,
-  FeedbackSummary,
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
@@ -214,23 +212,14 @@ function encodeListCursor(updatedAt: string, id: string): string {
 
 function decodeSpaceCursor(cursor: string): z.infer<typeof spaceCursorSchema> {
   try {
-    return spaceCursorSchema.parse(
-      JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
-    );
+    return spaceCursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
   } catch {
     throw new Error('Invalid space list cursor');
   }
 }
 
-function encodeSpaceCursor(
-  rank: number,
-  name: string,
-  id: string,
-  fingerprint: string,
-): string {
-  return Buffer.from(JSON.stringify({ rank, name, id, fingerprint }), 'utf8').toString(
-    'base64url',
-  );
+function encodeSpaceCursor(rank: number, name: string, id: string, fingerprint: string): string {
+  return Buffer.from(JSON.stringify({ rank, name, id, fingerprint }), 'utf8').toString('base64url');
 }
 
 function spaceListFingerprint(filters: SpaceListFilters): string {
@@ -653,9 +642,14 @@ export class MemoryStore {
     this.refreshCurrentVectors('memory.id = ?', memoryId);
   }
 
-  private refreshCurrentVectors(where: 'memory.id = ?' | 'memory.space_id = ?', value: string): void {
+  private refreshCurrentVectors(
+    where: 'memory.id = ?' | 'memory.space_id = ?',
+    value: string,
+  ): void {
     const deleteColumn = where === 'memory.id = ?' ? 'memory_id' : 'space_id';
-    this.database.prepare(`DELETE FROM memory_current_vectors WHERE ${deleteColumn} = ?`).run(value);
+    this.database
+      .prepare(`DELETE FROM memory_current_vectors WHERE ${deleteColumn} = ?`)
+      .run(value);
     this.database
       .prepare(
         `INSERT INTO memory_current_vectors(
@@ -1205,10 +1199,7 @@ export class MemoryStore {
     return revision;
   }
 
-  private searchRevisionFromRow(
-    row: Row,
-    relations: RevisionRelations,
-  ): MemorySearchRevision {
+  private searchRevisionFromRow(row: Row, relations: RevisionRelations): MemorySearchRevision {
     const revisionId = String(row.revision_id);
     return {
       id: revisionId,
@@ -1230,9 +1221,7 @@ export class MemoryStore {
   }
 
   private loadIdentityInfo(memories: Row[], atTime?: string): Map<string, MemoryIdentityInfo> {
-    const memoryIds = memories.map((memory) =>
-      String(memory.memory_record_id ?? memory.id),
-    );
+    const memoryIds = memories.map((memory) => String(memory.memory_record_id ?? memory.id));
     const identities = new Map<string, MemoryIdentityInfo>();
     for (const memory of memories) {
       const memoryId = String(memory.memory_record_id ?? memory.id);
@@ -1307,44 +1296,6 @@ export class MemoryStore {
       feedbackSummary:
         this.loadFeedbackSummaries([revisionId], atTime).get(revisionId) ??
         emptyFeedbackSummary(revisionId),
-    };
-  }
-
-  private memoryFromJoinedRow(
-    row: Row,
-    relations: RevisionRelations,
-    feedbackSummaries: Map<string, FeedbackSummary>,
-    identities: Map<string, MemoryIdentityInfo>,
-    state?: MemoryState,
-  ): MemoryRecord {
-    const memory: Row = {
-      id: row.memory_record_id,
-      space_id: row.memory_space_id,
-      logical_key: row.memory_logical_key,
-      state: row.memory_state,
-      created_at: row.memory_created_at,
-      updated_at: row.memory_updated_at,
-      current_revision_id: row.memory_current_revision_id,
-      index_status: row.memory_index_status,
-    };
-    const resolvedState = state ?? z.enum(['active', 'archived', 'deleted']).parse(memory.state);
-    const revisionId = String(row.revision_id);
-    const identity = identities.get(String(memory.id));
-    return {
-      id: String(memory.id),
-      spaceId: String(memory.space_id),
-      logicalKey: identity?.logicalKey ?? null,
-      canonicalMemoryId: identity?.canonicalMemoryId ?? null,
-      mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
-      state: resolvedState,
-      createdAt: String(memory.created_at),
-      updatedAt: String(memory.updated_at),
-      currentRevisionId: String(memory.current_revision_id),
-      indexStatus: z
-        .enum(['pending', 'ready', 'lexical-only', 'failed'])
-        .parse(memory.index_status),
-      revision: this.revisionFromRow(row, relations),
-      feedbackSummary: feedbackSummaries.get(revisionId) ?? emptyFeedbackSummary(revisionId),
     };
   }
 
@@ -1747,9 +1698,7 @@ export class MemoryStore {
     const pageRows = rows.slice(0, limit);
     const revisionIds = pageRows.map((row) => String(row.revision_id));
     const tagsByRevisionId = this.loadRevisionTags(revisionIds);
-    const feedbackSummaries = this.loadFeedbackSummaries(
-      revisionIds,
-    );
+    const feedbackSummaries = this.loadFeedbackSummaries(revisionIds);
     const identities = this.loadIdentityInfo(pageRows);
     const items = pageRows.map((row) =>
       this.summaryMemoryFromJoinedRow(row, tagsByRevisionId, feedbackSummaries, identities),
@@ -2322,10 +2271,7 @@ export class MemoryStore {
       metadataParameters.push(filters.minSalience);
     }
 
-    let candidateK = Math.min(
-      Math.max(CURRENT_VECTOR_INITIAL_K, limit * 5),
-      CURRENT_VECTOR_MAX_K,
-    );
+    let candidateK = Math.min(Math.max(CURRENT_VECTOR_INITIAL_K, limit * 5), CURRENT_VECTOR_MAX_K);
     let nearest: Row[] = [];
     let eligible: RankedSegment[] = [];
     while (true) {
@@ -2415,7 +2361,9 @@ export class MemoryStore {
     for (const duplicate of input.duplicates) {
       const existingRevision = duplicateRevisions.get(duplicate.memoryId);
       if (existingRevision && existingRevision !== duplicate.expectedRevisionId) {
-        throw new Error(`Duplicate memory has conflicting expected revisions: ${duplicate.memoryId}`);
+        throw new Error(
+          `Duplicate memory has conflicting expected revisions: ${duplicate.memoryId}`,
+        );
       }
       duplicateRevisions.set(duplicate.memoryId, duplicate.expectedRevisionId);
     }
@@ -2571,11 +2519,7 @@ export class MemoryStore {
         );
         const memory = duplicateRows.get(duplicate.memoryId);
         if (memory?.state === 'active') {
-          const archived = archive.run(
-            timestamp,
-            duplicate.memoryId,
-            duplicate.expectedRevisionId,
-          );
+          const archived = archive.run(timestamp, duplicate.memoryId, duplicate.expectedRevisionId);
           if (archived.changes !== 1) {
             throw new Error(`Memory changed concurrently during merge: ${duplicate.memoryId}`);
           }
@@ -2729,15 +2673,22 @@ export class MemoryStore {
       boundedLimit + 1,
     ).map((row) => this.linkFromRow(row));
     links.push(
-      ...this.redirectLinksForMany([memoryId], {
-        atTime,
-        relations: [],
-        direction: 'both',
-      }, boundedLimit + 1),
+      ...this.redirectLinksForMany(
+        [memoryId],
+        {
+          atTime,
+          relations: [],
+          direction: 'both',
+        },
+        boundedLimit + 1,
+      ),
     );
-    return links.sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    ).slice(0, boundedLimit);
+    return links
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      )
+      .slice(0, boundedLimit);
   }
 
   private redirectLinksForMany(
@@ -2866,7 +2817,8 @@ export class MemoryStore {
     const links = rows.map((row) => this.linkFromRow(row));
     links.push(...redirects);
     links.sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
     );
     const truncated =
       rows.length > boundedMaxRows ||
@@ -2986,7 +2938,10 @@ export class MemoryStore {
             idempotencyKey,
           )
         : undefined;
-      const memory = this.getRow('SELECT current_revision_id FROM memories WHERE id = ?', input.memoryId);
+      const memory = this.getRow(
+        'SELECT current_revision_id FROM memories WHERE id = ?',
+        input.memoryId,
+      );
       if (!memory) throw new Error(`Memory not found: ${input.memoryId}`);
       const existingRevisionId = existing ? optionalString(existing.revision_id) : null;
       const revisionId =
@@ -3064,7 +3019,9 @@ export class MemoryStore {
         filters.memoryId,
       )
     ) {
-      throw new Error(`Revision ${filters.revisionId} does not belong to memory ${filters.memoryId}`);
+      throw new Error(
+        `Revision ${filters.revisionId} does not belong to memory ${filters.memoryId}`,
+      );
     }
     const clauses = ['memory_id = ?'];
     const parameters: unknown[] = [filters.memoryId];
@@ -3098,9 +3055,7 @@ export class MemoryStore {
     return {
       items: pageRows.map((row) => this.feedbackFromRow(row)),
       nextCursor:
-        hasMore && last
-          ? encodeFeedbackCursor(String(last.created_at), String(last.id))
-          : null,
+        hasMore && last ? encodeFeedbackCursor(String(last.created_at), String(last.id)) : null,
     };
   }
 
@@ -3191,6 +3146,35 @@ export class MemoryStore {
     };
   }
 
+  public readiness(
+    modelsEnabled: boolean,
+    profile: EmbeddingIndexProfile,
+  ): {
+    ready: boolean;
+    database: 'ok';
+    schemaVersion: number;
+    vectorAvailable: boolean;
+    reasons: string[];
+  } {
+    this.requireRow('SELECT 1 AS ok');
+    const reasons: string[] = [];
+    if (modelsEnabled && !this.vectorAvailable)
+      reasons.push('semantic vector extension unavailable');
+    if (modelsEnabled && this.vectorAvailable) {
+      const generation = this.embeddingGenerationProgress(profile);
+      if (!generation?.isCurrent || generation.status !== 'complete') {
+        reasons.push('semantic index generation is not current');
+      }
+    }
+    return {
+      ready: reasons.length === 0,
+      database: 'ok',
+      schemaVersion: this.migrations.toVersion,
+      vectorAvailable: this.vectorAvailable,
+      reasons,
+    };
+  }
+
   public migrationStatus(): MigrationStatus {
     return {
       ...this.migrations,
@@ -3276,9 +3260,7 @@ export class MemoryStore {
       }
 
       if (!resumesCurrentGeneration && existing) {
-        this.database
-          .prepare('DELETE FROM index_jobs WHERE embedding_generation_id = ?')
-          .run(id);
+        this.database.prepare('DELETE FROM index_jobs WHERE embedding_generation_id = ?').run(id);
         this.database
           .prepare(
             `UPDATE embedding_index_generations

@@ -172,7 +172,10 @@ export class AuthorizationService {
     if (hideExistence && !this.can(context, spaceId, 'read')) {
       throw new MemoryAccessError('not-found-or-inaccessible');
     }
-    throw new MemoryAccessError('access-denied', `${required} access is required for space ${spaceId}`);
+    throw new MemoryAccessError(
+      'access-denied',
+      `${required} access is required for space ${spaceId}`,
+    );
   }
 
   public spaceIds(context: AccessContext, required: SpaceAccessLevel): string[] | undefined {

@@ -6,6 +6,7 @@ import type {
   SearchResponse,
   SearchResult,
   SearchScoreExplanation,
+  SearchStageTimings,
 } from '../domain/types.js';
 import type { Logger } from '../logger.js';
 import type { ModelClient } from '../models/model-client.js';
@@ -24,6 +25,10 @@ interface FusedCandidate {
 
 const RRF_CONSTANT = 60;
 const DEFAULT_TOP_K = 5;
+
+function roundStageMs(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 const EXCERPT_LIMIT = 2_000;
 const EXCERPT_HEADER_LIMIT = 400;
 const RERANK_DOCUMENT_LIMIT = 8_000;
@@ -225,6 +230,7 @@ export class SearchEngine {
     const fused = new Map<string, FusedCandidate>();
     let degraded = false;
     let degradationReason: string | undefined;
+    const stages: SearchStageTimings = {};
     const semanticCandidates =
       mode === 'lexical'
         ? null
@@ -232,7 +238,9 @@ export class SearchEngine {
             if (!this.config.modelsEnabled || !this.store.vectorAvailable) {
               throw new Error('Semantic inference or vector storage is disabled');
             }
+            const embedStarted = performance.now();
             const vector = await this.models.embedQuery(options.query);
+            stages.embedMs = roundStageMs(performance.now() - embedStarted);
             const profile = await this.models.embeddingProfile();
             if (profile.embedding_dimension !== vector.length) {
               throw new Error('Embedding model dimension changed during query processing');
@@ -244,26 +252,33 @@ export class SearchEngine {
               dimensions: vector.length,
               instructionHash: profile.query_instruction_hash,
             });
-            return this.store.semanticCandidates(
+            const semanticStarted = performance.now();
+            const candidates = this.store.semanticCandidates(
               vector,
               filters,
               this.config.semanticCandidates,
               modelProfileId,
             );
+            stages.semanticMs = roundStageMs(performance.now() - semanticStarted);
+            return candidates;
           })();
 
+    const exactStarted = performance.now();
     addRanking(
       fused,
       this.store.exactCandidates(options.query, filters, Math.min(topK * 2, 50)),
       'exact',
     );
+    stages.exactMs = roundStageMs(performance.now() - exactStarted);
 
     if (mode !== 'semantic') {
+      const lexicalStarted = performance.now();
       addRanking(
         fused,
         this.store.lexicalCandidates(options.query, filters, this.config.lexicalCandidates),
         'lexical',
       );
+      stages.lexicalMs = roundStageMs(performance.now() - lexicalStarted);
     }
 
     if (semanticCandidates) {
@@ -339,10 +354,12 @@ export class SearchEngine {
     if (shouldRerank) {
       const rerankSet = ordered.slice(0, rerankCandidateLimit(topK, this.config.rerankCandidates));
       try {
+        const rerankStarted = performance.now();
         const scores = await this.models.rerank(
           options.query,
           rerankSet.map((candidate) => rerankDocument(candidate)),
         );
+        stages.rerankMs = roundStageMs(performance.now() - rerankStarted);
         rerankSet.forEach((candidate, index) => {
           const score = scores[index];
           if (score === undefined) return;
@@ -372,6 +389,7 @@ export class SearchEngine {
       results,
       timingMs: Math.round((performance.now() - started) * 100) / 100,
     };
+    if (Object.keys(stages).length > 0) response.stageTimings = stages;
     if (degradationReason) response.degradationReason = degradationReason;
     return response;
   }

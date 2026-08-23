@@ -417,6 +417,7 @@ function compactSearch(
   if (options.explain) {
     payload.mode = response.mode;
     payload.timingMs = response.timingMs;
+    if (response.stageTimings) payload.stageTimings = asJson(response.stageTimings);
   }
   return asJson(payload);
 }

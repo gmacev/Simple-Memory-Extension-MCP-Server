@@ -165,6 +165,8 @@ try {
     topK: 2,
   });
   assert.equal(compactSearch.mode, undefined, 'ordinary search must omit diagnostics');
+  assert.equal(compactSearch.timingMs, undefined, 'ordinary search must omit timing');
+  assert.equal(compactSearch.stageTimings, undefined, 'ordinary search must omit stage timings');
   assert.equal(
     compactSearch.results[0]?.score,
     undefined,
@@ -186,6 +188,10 @@ try {
   assert.equal(explainedSearch.mode, 'lexical', 'explained search mode');
   assert.equal(typeof explainedSearch.timingMs, 'number', 'explained search timing');
   assert.equal(typeof explainedSearch.results[0]?.score?.fusedScore, 'number', 'explained score');
+  assert(
+    explainedSearch.stageTimings && typeof explainedSearch.stageTimings.exactMs === 'number',
+    'explained search must expose stage timings',
+  );
   assert.deepEqual(
     explainedSearch.results[0]?.sources?.[0]?.metadata,
     { phase: 2 },

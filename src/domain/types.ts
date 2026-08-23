@@ -302,6 +302,14 @@ export interface SearchResult {
   score: SearchScoreExplanation;
 }
 
+export interface SearchStageTimings {
+  embedMs?: number;
+  exactMs?: number;
+  lexicalMs?: number;
+  semanticMs?: number;
+  rerankMs?: number;
+}
+
 export interface SearchResponse {
   query: string;
   mode: string;
@@ -309,6 +317,7 @@ export interface SearchResponse {
   degradationReason?: string;
   results: SearchResult[];
   timingMs: number;
+  stageTimings?: SearchStageTimings;
 }
 
 export interface MemoryLink {

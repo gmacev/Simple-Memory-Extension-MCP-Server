@@ -39,14 +39,30 @@ export class Indexer {
   private async exactTokenize(segments: SegmentRecord[]): Promise<SegmentRecord[]> {
     if (!this.config.modelsEnabled) return segments;
     let working = segments;
+    let pendingIndices = working.map((_, index) => index);
     for (let pass = 0; pass < 4; pass += 1) {
-      const counts = await this.models.countTokens(working.map((segment) => segment.text));
+      if (pendingIndices.length === 0) break;
+      const counts = await this.models.countTokens(
+        pendingIndices.map((index) => working[index]?.text ?? ''),
+      );
+      const countedTokens = new Map<number, number>();
+      pendingIndices.forEach((index, position) => {
+        const count = counts[position];
+        const segment = working[index];
+        if (!segment || count === undefined) throw new Error('Tokenizer result mismatch');
+        countedTokens.set(index, count);
+      });
       let changed = false;
       const next: SegmentRecord[] = [];
+      const nextPending: number[] = [];
       for (let index = 0; index < working.length; index += 1) {
         const segment = working[index];
-        const tokenCount = counts[index];
-        if (!segment || tokenCount === undefined) throw new Error('Tokenizer result mismatch');
+        const tokenCount = countedTokens.get(index);
+        if (!segment) throw new Error('Tokenizer result mismatch');
+        if (tokenCount === undefined) {
+          next.push(segment);
+          continue;
+        }
         if (tokenCount <= MAX_SEGMENT_TOKENS) {
           next.push({ ...segment, tokenCount });
           continue;
@@ -58,8 +74,10 @@ export class Indexer {
         }
         changed = true;
         next.push({ ...segment, text: left }, { ...segment, text: right });
+        nextPending.push(next.length - 2, next.length - 1);
       }
       working = rebuildSegments(next);
+      pendingIndices = nextPending;
       if (!changed) return working;
     }
     return working;

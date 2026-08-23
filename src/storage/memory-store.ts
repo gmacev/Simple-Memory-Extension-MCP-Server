@@ -131,6 +131,9 @@ const retrievalFeedbackSignals = ['relevant', 'irrelevant', 'helpful', 'not_help
 const VECTOR_UNBOUNDED_FUTURE = '9999-12-31T23:59:59.999Z';
 const CURRENT_VECTOR_INITIAL_K = 100;
 const CURRENT_VECTOR_MAX_K = 2_000;
+const MAX_CACHED_STATEMENTS = 512;
+const memoryStateSchema = z.enum(['active', 'archived', 'deleted']);
+const memoryIndexStatusSchema = z.enum(['pending', 'ready', 'lexical-only', 'failed']);
 const contentFeedbackSignalSchema = z.enum(contentFeedbackSignals);
 const retrievalFeedbackSignalSchema = z.enum(retrievalFeedbackSignals);
 const feedbackScopeSchema = z.enum(['content', 'retrieval']);
@@ -315,6 +318,7 @@ export class MemoryStore {
   private readonly database: Database.Database;
   private readonly migrations: MigrationStatus;
   private readonly ensuredModelProfileIds = new Set<string>();
+  private readonly statements = new Map<string, Database.Statement<unknown[], Row>>();
   public readonly vectorAvailable: boolean;
 
   public constructor(
@@ -326,6 +330,8 @@ export class MemoryStore {
     this.database.pragma('journal_mode = WAL');
     this.database.pragma('foreign_keys = ON');
     this.database.pragma('busy_timeout = 5000');
+    this.database.pragma('temp_store = MEMORY');
+    this.database.pragma('cache_size = -16000');
     let vectorExtensionLoaded = false;
     try {
       sqliteVec.load(this.database);
@@ -433,12 +439,22 @@ export class MemoryStore {
       .run(now());
   }
 
+  private prepare(sql: string): Database.Statement<unknown[], Row> {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      if (this.statements.size >= MAX_CACHED_STATEMENTS) this.statements.clear();
+      statement = this.database.prepare<unknown[], Row>(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+
   private allRows(sql: string, ...parameters: unknown[]): Row[] {
-    return this.database.prepare<unknown[], Row>(sql).all(...parameters);
+    return this.prepare(sql).all(...parameters);
   }
 
   private getRow(sql: string, ...parameters: unknown[]): Row | undefined {
-    return this.database.prepare<unknown[], Row>(sql).get(...parameters);
+    return this.prepare(sql).get(...parameters);
   }
 
   private requireRow(sql: string, ...parameters: unknown[]): Row {
@@ -920,11 +936,9 @@ export class MemoryStore {
         contentHash(canonicalRevisionPayload(input, args.tags, args.metadata)),
         args.searchableText,
       );
-    const insertTag = this.database.prepare(
-      'INSERT INTO revision_tags(revision_id, tag) VALUES (?, ?)',
-    );
+    const insertTag = this.prepare('INSERT INTO revision_tags(revision_id, tag) VALUES (?, ?)');
     for (const tag of args.tags) insertTag.run(args.id, tag);
-    const insertSource = this.database.prepare(
+    const insertSource = this.prepare(
       `INSERT INTO revision_sources(
         id, revision_id, uri, label, type, observed_at, metadata_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -993,7 +1007,7 @@ export class MemoryStore {
       matchedMemoryId,
       canonicalMemoryId,
       currentRevisionId: String(canonical.current_revision_id),
-      state: z.enum(['active', 'archived', 'deleted']).parse(canonical.state),
+      state: memoryStateSchema.parse(canonical.state),
     });
   }
 
@@ -1274,7 +1288,7 @@ export class MemoryStore {
   private memoryFromRows(
     memory: Row,
     revision: Row,
-    state = z.enum(['active', 'archived', 'deleted']).parse(memory.state),
+    state = memoryStateSchema.parse(memory.state),
     atTime?: string,
   ): MemoryRecord {
     const revisionId = String(revision.revision_id ?? revision.id);
@@ -1289,9 +1303,7 @@ export class MemoryStore {
       createdAt: String(memory.created_at),
       updatedAt: String(memory.updated_at),
       currentRevisionId: String(memory.current_revision_id),
-      indexStatus: z
-        .enum(['pending', 'ready', 'lexical-only', 'failed'])
-        .parse(memory.index_status),
+      indexStatus: memoryIndexStatusSchema.parse(memory.index_status),
       revision: this.revisionFromRow(revision),
       feedbackSummary:
         this.loadFeedbackSummaries([revisionId], atTime).get(revisionId) ??
@@ -1314,12 +1326,10 @@ export class MemoryStore {
       logicalKey: identity?.logicalKey ?? null,
       canonicalMemoryId: identity?.canonicalMemoryId ?? null,
       mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
-      state: z.enum(['active', 'archived', 'deleted']).parse(row.memory_state),
+      state: memoryStateSchema.parse(row.memory_state),
       updatedAt: String(row.memory_updated_at),
       currentRevisionId: String(row.memory_current_revision_id),
-      indexStatus: z
-        .enum(['pending', 'ready', 'lexical-only', 'failed'])
-        .parse(row.memory_index_status),
+      indexStatus: memoryIndexStatusSchema.parse(row.memory_index_status),
       revision: {
         id: revisionId,
         revisionNumber: Number(row.revision_number),
@@ -1353,12 +1363,10 @@ export class MemoryStore {
       logicalKey: identity?.logicalKey ?? null,
       canonicalMemoryId: identity?.canonicalMemoryId ?? null,
       mergedMemoryCount: identity?.mergedMemoryCount ?? 0,
-      state: state ?? z.enum(['active', 'archived', 'deleted']).parse(row.memory_state),
+      state: state ?? memoryStateSchema.parse(row.memory_state),
       updatedAt: String(row.memory_updated_at),
       currentRevisionId: String(row.memory_current_revision_id),
-      indexStatus: z
-        .enum(['pending', 'ready', 'lexical-only', 'failed'])
-        .parse(row.memory_index_status),
+      indexStatus: memoryIndexStatusSchema.parse(row.memory_index_status),
       revision: this.searchRevisionFromRow(row, relations),
       feedbackSummary: feedbackSummaries.get(revisionId) ?? emptyFeedbackSummary(revisionId),
     };
@@ -1403,7 +1411,7 @@ export class MemoryStore {
         options.atTime,
       );
       if (!stateRow) throw new Error('No memory state exists at the requested point in time');
-      state = z.enum(['active', 'archived', 'deleted']).parse(stateRow.state);
+      state = memoryStateSchema.parse(stateRow.state);
     }
     return this.memoryFromRows(memory, revision, state, options.atTime);
   }
@@ -1478,10 +1486,7 @@ export class MemoryStore {
         ...memoryIds,
         atTime,
       )) {
-        statesByMemoryId.set(
-          String(row.memory_id),
-          z.enum(['active', 'archived', 'deleted']).parse(row.state),
-        );
+        statesByMemoryId.set(String(row.memory_id), memoryStateSchema.parse(row.state));
       }
     }
 
@@ -1548,10 +1553,7 @@ export class MemoryStore {
       ...uniqueMemoryIds,
       atTime,
     )) {
-      statesByMemoryId.set(
-        String(row.memory_id),
-        z.enum(['active', 'archived', 'deleted']).parse(row.state),
-      );
+      statesByMemoryId.set(String(row.memory_id), memoryStateSchema.parse(row.state));
     }
     for (const row of rows) {
       const memoryId = String(row.memory_record_id);
@@ -1566,7 +1568,7 @@ export class MemoryStore {
   }
 
   public getHistory(memoryId: string): MemoryRevision[] {
-    if (!this.database.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
+    if (!this.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) {
       throw new Error(`Memory not found: ${memoryId}`);
     }
     const rows = this.allRows(
@@ -1815,10 +1817,8 @@ export class MemoryStore {
           'SELECT id FROM memory_segments WHERE revision_id = ?',
           revisionId,
         ).map((row) => String(row.id));
-        const removeVector = this.database.prepare(
-          'DELETE FROM memory_vectors WHERE segment_id = ?',
-        );
-        const removeCurrentVector = this.database.prepare(
+        const removeVector = this.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+        const removeCurrentVector = this.prepare(
           'DELETE FROM memory_current_vectors WHERE segment_id = ?',
         );
         for (const segmentId of priorSegmentIds) {
@@ -1826,14 +1826,14 @@ export class MemoryStore {
           removeCurrentVector.run(segmentId);
         }
       }
-      this.database.prepare('DELETE FROM memory_fts WHERE revision_id = ?').run(revisionId);
-      this.database.prepare('DELETE FROM memory_segments WHERE revision_id = ?').run(revisionId);
-      const insertSegment = this.database.prepare(
+      this.prepare('DELETE FROM memory_fts WHERE revision_id = ?').run(revisionId);
+      this.prepare('DELETE FROM memory_segments WHERE revision_id = ?').run(revisionId);
+      const insertSegment = this.prepare(
         `INSERT INTO memory_segments(
           id, memory_id, revision_id, space_id, ordinal, path, text, token_count, content_hash
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
-      const insertFts = this.database.prepare(
+      const insertFts = this.prepare(
         `INSERT INTO memory_fts(segment_id, memory_id, revision_id, space_id, title, text, tags)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
@@ -1871,25 +1871,23 @@ export class MemoryStore {
     if (!this.vectorAvailable) throw new Error('sqlite-vec is unavailable');
     if (segments.length !== vectors.length) throw new Error('Segment/vector count mismatch');
     const transaction = this.database.transaction(() => {
-      const remove = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
-      const removeCurrent = this.database.prepare(
-        'DELETE FROM memory_current_vectors WHERE segment_id = ?',
-      );
-      const segmentExists = this.database.prepare(
+      const remove = this.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+      const removeCurrent = this.prepare('DELETE FROM memory_current_vectors WHERE segment_id = ?');
+      const segmentExists = this.prepare(
         'SELECT 1 FROM memory_segments WHERE id = ? AND revision_id = ?',
       );
-      const insert = this.database.prepare(
+      const insert = this.prepare(
         `INSERT INTO memory_vectors(segment_id, embedding, model_profile_id)
          VALUES (?, ?, ?)`,
       );
-      const insertCurrent = this.database.prepare(
+      const insertCurrent = this.prepare(
         `INSERT INTO memory_current_vectors(
            segment_id, embedding, model_profile_id, memory_id, space_id,
            memory_state, space_state, kind, confidence, salience,
            valid_from, valid_to, expires_at, recorded_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS REAL), CAST(? AS REAL), ?, ?, ?, ?)`,
       );
-      const markProfile = this.database.prepare(
+      const markProfile = this.prepare(
         'UPDATE memory_segments SET model_profile_id = ? WHERE id = ?',
       );
       const firstSegment = segments[0];
@@ -2172,27 +2170,56 @@ export class MemoryStore {
     if (terms.length === 0) return [];
     const match = [...new Set(terms)].map((term) => `"${term.replaceAll('"', '""')}"`).join(' OR ');
     const candidates = this.candidateClauses(filters);
+    const prefilterParameters: unknown[] = [];
+    let prefilterSql = '';
+    if (filters.spaceIds !== undefined) {
+      if (filters.spaceIds.length === 0) {
+        prefilterSql = ' AND 0 = 1';
+      } else {
+        prefilterSql = ` AND f.space_id IN (${filters.spaceIds.map(() => '?').join(',')})`;
+        prefilterParameters.push(...filters.spaceIds);
+      }
+    }
     const rows = this.allRows(
-      `SELECT f.segment_id, f.memory_id, f.revision_id, s.text, s.path,
-                bm25(memory_fts, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.5) AS rank_value
-         FROM memory_fts f
-         JOIN memory_segments s ON s.id = f.segment_id
-         JOIN memories m ON m.id = f.memory_id
-         JOIN memory_revisions r ON r.id = f.revision_id
-         WHERE memory_fts MATCH ? AND ${candidates.sql}
-         ORDER BY rank_value LIMIT ?`,
+      `SELECT f.segment_id AS segment_id,
+              f.memory_id AS memory_id,
+              f.revision_id AS revision_id,
+              bm25(memory_fts, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.5) AS rank_value
+       FROM memory_fts f
+       JOIN memories m ON m.id = f.memory_id
+       JOIN memory_revisions r ON r.id = f.revision_id
+       WHERE memory_fts MATCH ?${prefilterSql} AND ${candidates.sql}
+       ORDER BY rank_value
+       LIMIT ?`,
       match,
+      ...prefilterParameters,
       ...candidates.parameters,
       limit,
     );
-    return rows.map((row) => ({
-      segmentId: String(row.segment_id),
-      memoryId: String(row.memory_id),
-      revisionId: String(row.revision_id),
-      text: String(row.text),
-      path: String(row.path),
-      rankValue: Number(row.rank_value),
-    }));
+    if (rows.length === 0) return [];
+    const segmentTexts = new Map<string, { text: string; path: string }>();
+    for (const row of rows) {
+      const segmentId = String(row.segment_id);
+      const segment = this.getRow(
+        'SELECT text AS text, path AS path FROM memory_segments WHERE id = ?',
+        segmentId,
+      );
+      segmentTexts.set(segmentId, {
+        text: String(segment?.text ?? ''),
+        path: String(segment?.path ?? ''),
+      });
+    }
+    return rows.map((row) => {
+      const segmentId = String(row.segment_id);
+      return {
+        segmentId,
+        memoryId: String(row.memory_id),
+        revisionId: String(row.revision_id),
+        text: segmentTexts.get(segmentId)?.text ?? '',
+        path: segmentTexts.get(segmentId)?.path ?? '',
+        rankValue: Number(row.rank_value),
+      };
+    });
   }
 
   public semanticCandidates(
@@ -2487,21 +2514,21 @@ export class MemoryStore {
           requestHash,
           timestamp,
         );
-      const insertMember = this.database.prepare(
+      const insertMember = this.prepare(
         `INSERT INTO memory_merge_members(
            operation_id, duplicate_memory_id, duplicate_revision_id
          ) VALUES (?, ?, ?)`,
       );
-      const insertRedirect = this.database.prepare(
+      const insertRedirect = this.prepare(
         `INSERT INTO memory_redirect_events(
            id, source_memory_id, canonical_memory_id, operation_id, direct, created_at
          ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
-      const archive = this.database.prepare(
+      const archive = this.prepare(
         `UPDATE memories SET state = 'archived', updated_at = ?
          WHERE id = ? AND state = 'active' AND current_revision_id = ?`,
       );
-      const insertStateEvent = this.database.prepare(
+      const insertStateEvent = this.prepare(
         `INSERT INTO memory_state_events(id, memory_id, event_number, state, recorded_at)
          SELECT ?, ?, COALESCE(MAX(event_number), 0) + 1, 'archived', ?
          FROM memory_state_events WHERE memory_id = ?`,
@@ -3260,7 +3287,7 @@ export class MemoryStore {
       }
 
       if (!resumesCurrentGeneration && existing) {
-        this.database.prepare('DELETE FROM index_jobs WHERE embedding_generation_id = ?').run(id);
+        this.prepare('DELETE FROM index_jobs WHERE embedding_generation_id = ?').run(id);
         this.database
           .prepare(
             `UPDATE embedding_index_generations
@@ -3299,7 +3326,7 @@ export class MemoryStore {
         this.database.exec('DROP TABLE IF EXISTS memory_current_vectors');
         this.database.exec('DROP TABLE IF EXISTS memory_vectors');
         this.ensureVectorTables();
-        this.database.prepare('UPDATE memory_segments SET model_profile_id = NULL').run();
+        this.prepare('UPDATE memory_segments SET model_profile_id = NULL').run();
         this.database
           .prepare(
             `UPDATE memories SET index_status = 'pending'
@@ -3327,7 +3354,7 @@ export class MemoryStore {
         'SELECT id FROM memory_revisions WHERE recorded_at <= ? ORDER BY recorded_at, id',
         cutoff,
       );
-      const insert = this.database.prepare(
+      const insert = this.prepare(
         `INSERT OR IGNORE INTO index_jobs(
            id, revision_id, status, attempts, created_at, updated_at, embedding_generation_id
          ) VALUES (?, ?, 'pending', 0, ?, ?, ?)`,
@@ -3415,11 +3442,11 @@ export class MemoryStore {
     const timestamp = now();
     let queued = 0;
     const transaction = this.database.transaction(() => {
-      const insert = this.database.prepare(
+      const insert = this.prepare(
         `INSERT INTO index_jobs(id, revision_id, status, attempts, created_at, updated_at)
          VALUES (?, ?, 'pending', 0, ?, ?)`,
       );
-      const mark = this.database.prepare(
+      const mark = this.prepare(
         "UPDATE memories SET index_status = 'pending' WHERE current_revision_id = ?",
       );
       for (const row of rows) {
@@ -3517,10 +3544,10 @@ export class MemoryStore {
       'SELECT id FROM memory_segments WHERE memory_id = ?',
       memoryId,
     ).map((row) => String(row.id));
-    this.database.prepare('DELETE FROM memory_fts WHERE memory_id = ?').run(memoryId);
+    this.prepare('DELETE FROM memory_fts WHERE memory_id = ?').run(memoryId);
     if (this.vectorAvailable) {
-      const removeVector = this.database.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
-      const removeCurrentVector = this.database.prepare(
+      const removeVector = this.prepare('DELETE FROM memory_vectors WHERE segment_id = ?');
+      const removeCurrentVector = this.prepare(
         'DELETE FROM memory_current_vectors WHERE segment_id = ?',
       );
       for (const segmentId of segmentIds) {
@@ -3552,14 +3579,14 @@ export class MemoryStore {
     this.database
       .prepare('DELETE FROM memory_links WHERE from_memory_id = ? OR to_memory_id = ?')
       .run(memoryId, memoryId);
-    this.database.prepare('DELETE FROM memory_feedback WHERE memory_id = ?').run(memoryId);
-    this.database.prepare('DELETE FROM memory_state_events WHERE memory_id = ?').run(memoryId);
+    this.prepare('DELETE FROM memory_feedback WHERE memory_id = ?').run(memoryId);
+    this.prepare('DELETE FROM memory_state_events WHERE memory_id = ?').run(memoryId);
     this.database
       .prepare(
         'DELETE FROM index_jobs WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
       )
       .run(memoryId);
-    this.database.prepare('DELETE FROM memory_segments WHERE memory_id = ?').run(memoryId);
+    this.prepare('DELETE FROM memory_segments WHERE memory_id = ?').run(memoryId);
     this.database
       .prepare(
         'DELETE FROM revision_sources WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
@@ -3570,8 +3597,8 @@ export class MemoryStore {
         'DELETE FROM revision_tags WHERE revision_id IN (SELECT id FROM memory_revisions WHERE memory_id = ?)',
       )
       .run(memoryId);
-    this.database.prepare('DELETE FROM memory_revisions WHERE memory_id = ?').run(memoryId);
-    this.database.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
+    this.prepare('DELETE FROM memory_revisions WHERE memory_id = ?').run(memoryId);
+    this.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
   }
 
   public deleteMemory(memoryId: string): boolean {

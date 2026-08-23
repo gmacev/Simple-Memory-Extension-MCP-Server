@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
@@ -28,10 +29,13 @@ export type EmbeddingModelProfile = Pick<
   'embedding_dimension' | 'embedding_model' | 'embedding_revision' | 'query_instruction_hash'
 >;
 
+const QUERY_EMBEDDING_CACHE_LIMIT = 128;
+
 export class ModelClient {
   private readonly transport: ModelWorkerTransport;
   private readonly scheduler: InferenceScheduler;
   private embeddingProfilePromise: Promise<EmbeddingModelProfile> | null = null;
+  private readonly queryEmbeddingCache = new Map<string, Promise<number[]>>();
 
   public constructor(config: AppConfig, logger: Logger, forwardWorkerStderr = false) {
     this.transport = new ModelWorkerTransport(config, logger, forwardWorkerStderr);
@@ -85,7 +89,24 @@ export class ModelClient {
   }
 
   public embedQuery(text: string): Promise<number[]> {
-    return this.scheduler.embedQuery(text);
+    const key = createHash('sha256').update(text, 'utf8').digest('hex');
+    const cached = this.queryEmbeddingCache.get(key);
+    if (cached) {
+      this.queryEmbeddingCache.delete(key);
+      this.queryEmbeddingCache.set(key, cached);
+      return cached;
+    }
+    const pending = this.scheduler.embedQuery(text);
+    this.queryEmbeddingCache.set(key, pending);
+    void pending.catch(() => {
+      if (this.queryEmbeddingCache.get(key) === pending) this.queryEmbeddingCache.delete(key);
+    });
+    while (this.queryEmbeddingCache.size > QUERY_EMBEDDING_CACHE_LIMIT) {
+      const oldest = this.queryEmbeddingCache.keys().next();
+      if (oldest.done) break;
+      this.queryEmbeddingCache.delete(oldest.value);
+    }
+    return pending;
   }
 
   public rerank(query: string, documents: string[]): Promise<number[]> {

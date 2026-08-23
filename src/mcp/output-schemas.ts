@@ -352,6 +352,16 @@ export const toolOutputSchemas = {
       degradationReason: z.string().optional(),
       mode: z.enum(['auto', 'fast', 'quality', 'lexical', 'semantic']).optional(),
       timingMs: z.number().nonnegative().optional(),
+      stageTimings: z
+        .object({
+          embedMs: z.number().nonnegative().optional(),
+          exactMs: z.number().nonnegative().optional(),
+          lexicalMs: z.number().nonnegative().optional(),
+          semanticMs: z.number().nonnegative().optional(),
+          rerankMs: z.number().nonnegative().optional(),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   memory_archive: lifecycleAcknowledgementOutputSchema,

@@ -115,7 +115,7 @@ async function run() {
 
     for (let index = 0; index < clientsCount; index += 1) {
       const client = new Client(
-        { name: `simple-memory-load-agent-${index}`, version: '3.6.0' },
+        { name: `simple-memory-load-agent-${index}`, version: '3.8.0' },
         { versionNegotiation: { mode: 'auto' } },
       );
       await client.connect(

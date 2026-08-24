@@ -442,7 +442,7 @@ export class MemoryStore {
     this.database
       .prepare(
         `INSERT INTO spaces(id, name, description, metadata_json, created_at)
-         VALUES ('default', 'Global', 'Global memory shared across contexts.', '{}', ?)
+         VALUES ('default', 'Global', 'Broadly applicable preferences, working norms, and durable context shared across projects and domains. Context-specific information belongs in its own space.', '{}', ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            description = excluded.description`,

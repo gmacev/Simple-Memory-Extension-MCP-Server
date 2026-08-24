@@ -90,7 +90,8 @@ async function run() {
     const globalSpace = service.listSpaces({ id: 'default' }).items[0];
     assert(globalSpace?.name === 'Global', 'default space must advertise its global role');
     assert(
-      globalSpace.description === 'Global memory shared across contexts.',
+      globalSpace.description ===
+        'Broadly applicable preferences, working norms, and durable context shared across projects and domains. Context-specific information belongs in its own space.',
       'default space must describe its cross-context scope',
     );
     first = await service.createMemory({
@@ -159,7 +160,8 @@ async function run() {
     const normalizedGlobalSpace = service.listSpaces({ id: 'default' }).items[0];
     assert(normalizedGlobalSpace?.name === 'Global', 'legacy default space name must be updated');
     assert(
-      normalizedGlobalSpace.description === 'Global memory shared across contexts.',
+      normalizedGlobalSpace.description ===
+        'Broadly applicable preferences, working norms, and durable context shared across projects and domains. Context-specific information belongs in its own space.',
       'legacy default space description must be updated',
     );
     assert(service.getMemory(first.id).id === first.id, 'baseline memory must survive restore');

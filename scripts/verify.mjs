@@ -18,6 +18,8 @@ const checks = [
   [process.execPath, ['scripts/embedding-generation-probe.mjs']],
   [process.execPath, ['scripts/embedding-upgrade-probe.mjs']],
   [process.execPath, ['scripts/inference-scheduler-probe.mjs']],
+  [process.execPath, ['scripts/python-worker-protocol-probe.mjs']],
+  [process.execPath, ['scripts/python-runtime-optimization-probe.mjs']],
   [process.execPath, ['scripts/rerank-cache-probe.mjs']],
   [process.execPath, ['scripts/retrieval-eval-probe.mjs']],
   [process.execPath, ['scripts/http-probe.mjs']],

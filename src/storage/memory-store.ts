@@ -120,6 +120,14 @@ function embeddingProfileId(input: EmbeddingIndexProfile): string {
     .digest('hex');
 }
 
+function float32Buffer(vector: ArrayLike<number>): Buffer {
+  if (vector instanceof Float32Array) {
+    return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
+  }
+  const values = Float32Array.from(vector);
+  return Buffer.from(values.buffer, values.byteOffset, values.byteLength);
+}
+
 const contentFeedbackSignals = [
   'verified',
   'correct',
@@ -1865,7 +1873,7 @@ export class MemoryStore {
 
   public indexVectors(
     segments: SegmentRecord[],
-    vectors: number[][],
+    vectors: ReadonlyArray<ArrayLike<number>>,
     modelProfileId: string,
   ): void {
     if (!this.vectorAvailable) throw new Error('sqlite-vec is unavailable');
@@ -1925,11 +1933,12 @@ export class MemoryStore {
         }
         remove.run(segment.id);
         removeCurrent.run(segment.id);
-        insert.run(segment.id, Buffer.from(new Float32Array(vector).buffer), modelProfileId);
+        const vectorBlob = float32Buffer(vector);
+        insert.run(segment.id, vectorBlob, modelProfileId);
         if (isCurrentRevision) {
           insertCurrent.run(
             segment.id,
-            Buffer.from(new Float32Array(vector).buffer),
+            vectorBlob,
             modelProfileId,
             current.memory_id,
             current.space_id,
@@ -2223,13 +2232,13 @@ export class MemoryStore {
   }
 
   public semanticCandidates(
-    vector: number[],
+    vector: ArrayLike<number>,
     filters: CandidateFilters,
     limit: number,
     modelProfileId: string,
   ): RankedSegment[] {
     if (!this.vectorAvailable) return [];
-    const vectorBlob = Buffer.from(new Float32Array(vector).buffer);
+    const vectorBlob = float32Buffer(vector);
     if (filters.atTime || (filters.tags?.length ?? 0) > 0) {
       const candidates = this.candidateClauses(filters);
       const table = filters.atTime ? 'memory_vectors' : 'memory_current_vectors';

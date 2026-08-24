@@ -1,3 +1,4 @@
+import { endianness } from 'node:os';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
@@ -9,7 +10,16 @@ import {
 } from './inference-errors.js';
 import type { InferenceWorkerTransport } from './worker-transport.js';
 
-const embeddingResponseSchema = z.object({ vectors: z.array(z.array(z.number())) });
+const canonicalBase64Schema = z
+  .string()
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+const packedFloat32MatrixSchema = z.object({
+  encoding: z.literal('base64-f32le'),
+  rows: z.number().int().nonnegative(),
+  dimensions: z.number().int().nonnegative(),
+  data: canonicalBase64Schema,
+});
+const embeddingResponseSchema = z.object({ vectors: packedFloat32MatrixSchema });
 const countResponseSchema = z.object({ counts: z.array(z.number().int().nonnegative()) });
 const rerankResponseSchema = z.object({ scores: z.array(z.number()) });
 
@@ -18,6 +28,8 @@ const RERANK_SLICE_CHARACTER_BUDGET = 32_000;
 
 type Lane = 'query' | 'ingestion' | 'rerank';
 type RequestKind = 'raw' | 'query' | 'documents' | 'count' | 'rerank';
+
+export type EmbeddingVector = Float32Array;
 
 interface RequestBase<T> {
   id: number;
@@ -37,16 +49,16 @@ interface RawRequest extends RequestBase<unknown> {
   payload: Record<string, unknown>;
 }
 
-interface QueryRequest extends RequestBase<number[]> {
+interface QueryRequest extends RequestBase<EmbeddingVector> {
   kind: 'query';
   text: string;
 }
 
-interface DocumentsRequest extends RequestBase<number[][]> {
+interface DocumentsRequest extends RequestBase<EmbeddingVector[]> {
   kind: 'documents';
   texts: string[];
   cursor: number;
-  vectors: Array<number[] | undefined>;
+  vectors: Array<EmbeddingVector | undefined>;
 }
 
 interface CountRequest extends RequestBase<number[]> {
@@ -111,6 +123,50 @@ function completedArray<T>(items: Array<T | undefined>, label: string): T[] {
     throw new ModelWorkerFailureError(`Incomplete ${label} response from model worker`);
   }
   return items as T[];
+}
+
+function decodeFloat32Values(data: string, valueCount: number, label: string): Float32Array {
+  if (!Number.isSafeInteger(valueCount)) {
+    throw new ModelWorkerFailureError(`${label} shape exceeds the supported size`);
+  }
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.toString('base64') !== data) {
+    throw new ModelWorkerFailureError(`${label} contains invalid base64 data`);
+  }
+  const expectedBytes = valueCount * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedBytes) {
+    throw new ModelWorkerFailureError(
+      `${label} byte length mismatch: expected ${String(expectedBytes)}, received ${String(bytes.byteLength)}`,
+    );
+  }
+  const values = new Float32Array(valueCount);
+  if (endianness() === 'LE') {
+    new Uint8Array(values.buffer).set(bytes);
+  } else {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let index = 0; index < valueCount; index += 1) {
+      values[index] = view.getFloat32(index * Float32Array.BYTES_PER_ELEMENT, true);
+    }
+  }
+  for (const value of values) {
+    if (!Number.isFinite(value)) {
+      throw new ModelWorkerFailureError(`${label} contains a non-finite value`);
+    }
+  }
+  return values;
+}
+
+function decodeEmbeddingMatrix(raw: unknown): EmbeddingVector[] {
+  const packed = embeddingResponseSchema.parse(raw).vectors;
+  if ((packed.rows === 0) !== (packed.dimensions === 0)) {
+    throw new ModelWorkerFailureError('Embedding matrix has an invalid empty shape');
+  }
+  const valueCount = packed.rows * packed.dimensions;
+  const values = decodeFloat32Values(packed.data, valueCount, 'Embedding matrix');
+  return Array.from({ length: packed.rows }, (_, row) => {
+    const start = row * packed.dimensions;
+    return values.subarray(start, start + packed.dimensions);
+  });
 }
 
 export class InferenceScheduler {
@@ -316,7 +372,7 @@ export class InferenceScheduler {
       operation: 'embed_queries',
       payload: { texts: requests.map((request) => request.text) },
       apply: (raw) => {
-        const { vectors } = embeddingResponseSchema.parse(raw);
+        const vectors = decodeEmbeddingMatrix(raw);
         if (vectors.length !== requests.length) {
           throw new ModelWorkerFailureError('Query embedding batch length mismatch');
         }
@@ -358,7 +414,7 @@ export class InferenceScheduler {
       operation: 'embed_documents',
       payload: { texts: mappings.map(({ request, index }) => request.texts[index] ?? '') },
       apply: (raw) => {
-        const { vectors } = embeddingResponseSchema.parse(raw);
+        const vectors = decodeEmbeddingMatrix(raw);
         if (vectors.length !== mappings.length) {
           throw new ModelWorkerFailureError('Document embedding batch length mismatch');
         }
@@ -521,7 +577,7 @@ export class InferenceScheduler {
     });
   }
 
-  public embedQuery(text: string): Promise<number[]> {
+  public embedQuery(text: string): Promise<EmbeddingVector> {
     return requestPromise((resolve, reject) => {
       const request: QueryRequest = {
         ...this.base('query', 'query', resolve, reject),
@@ -532,7 +588,7 @@ export class InferenceScheduler {
     });
   }
 
-  public embedDocuments(texts: string[]): Promise<number[][]> {
+  public embedDocuments(texts: string[]): Promise<EmbeddingVector[]> {
     if (texts.length === 0) return Promise.resolve([]);
     return requestPromise((resolve, reject) => {
       const request: DocumentsRequest = {

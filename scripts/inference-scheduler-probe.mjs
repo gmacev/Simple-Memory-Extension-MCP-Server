@@ -15,6 +15,22 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function packedVectors(vectors) {
+  const rows = vectors.length;
+  const dimensions = vectors[0]?.length ?? 0;
+  assert(
+    vectors.every((vector) => vector.length === dimensions),
+    'fake embedding vectors must have equal dimensions',
+  );
+  const values = new Float32Array(vectors.flat());
+  return {
+    encoding: 'base64-f32le',
+    rows,
+    dimensions,
+    data: Buffer.from(values.buffer).toString('base64'),
+  };
+}
+
 function config(overrides = {}) {
   return {
     embeddingBatchSize: 8,
@@ -55,7 +71,11 @@ class FakeTransport {
 
   response(operation, payload) {
     if (operation === 'embed_queries' || operation === 'embed_documents') {
-      return { vectors: payload.texts.map((text) => [text.length, text.codePointAt(0) ?? 0]) };
+      return {
+        vectors: packedVectors(
+          payload.texts.map((text) => [text.length, text.codePointAt(0) ?? 0]),
+        ),
+      };
     }
     if (operation === 'count_tokens') return { counts: payload.texts.map((text) => text.length) };
     if (operation === 'rerank_pairs') {
@@ -106,7 +126,9 @@ async function batchingAndFairness() {
   );
   assert(transport.calls[0]?.payload.texts.length === 2, 'compatible queries should microbatch');
   assert(
-    queryResults[0]?.[0] === 5 && queryResults[1]?.[0] === 4,
+    queryResults.every((vector) => vector instanceof Float32Array) &&
+      queryResults[0]?.[0] === 5 &&
+      queryResults[1]?.[0] === 4,
     'query vectors should map to callers',
   );
 
@@ -120,7 +142,9 @@ async function batchingAndFairness() {
     'document embeddings should coalesce across writes',
   );
   assert(
-    firstDocuments[0]?.[0] === 2 && firstDocuments[1]?.[0] === 3,
+    firstDocuments.every((vector) => vector instanceof Float32Array) &&
+      firstDocuments[0]?.[0] === 2 &&
+      firstDocuments[1]?.[0] === 3,
     'first document mapping should be stable',
   );
   assert(secondDocuments[0]?.[0] === 4, 'second document mapping should be stable');
@@ -162,6 +186,41 @@ async function batchingAndFairness() {
     'per-lane completion metrics should be accurate',
   );
   await scheduler.stop();
+}
+
+async function embeddingResponseValidation() {
+  const malformed = [
+    {
+      encoding: 'base64-f32le',
+      rows: 1,
+      dimensions: 2,
+      data: '%%%%',
+    },
+    {
+      encoding: 'base64-f32le',
+      rows: 2,
+      dimensions: 2,
+      data: Buffer.from(new Float32Array([1, 2, 3]).buffer).toString('base64'),
+    },
+    packedVectors([[Number.NaN, 1]]),
+    {
+      encoding: 'base64-f32le',
+      rows: 0,
+      dimensions: 2,
+      data: '',
+    },
+  ];
+  for (const vectors of malformed) {
+    const transport = new FakeTransport();
+    transport.response = () => ({ vectors });
+    const scheduler = new InferenceScheduler(config(), transport, logger);
+    await assertRejects(
+      scheduler.embedQuery('invalid response'),
+      Error,
+      'malformed packed embeddings must fail validation',
+    );
+    await scheduler.stop();
+  }
 }
 
 async function capacityAndQueueTimeout() {
@@ -285,6 +344,7 @@ async function assertRejects(promise, ErrorType, message) {
 }
 
 await batchingAndFairness();
+await embeddingResponseValidation();
 await capacityAndQueueTimeout();
 await weightedLaneOrder();
 await executionRecoveryAndShutdown();

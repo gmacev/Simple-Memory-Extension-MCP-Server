@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
 import traceback
 from typing import Any
+
+import numpy as np
 
 from .runtime import ModelRuntime, RuntimeConfig
 
@@ -44,6 +47,33 @@ def _require_pairs(payload: dict[str, Any], key: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _packed_float32_matrix(values: object) -> dict[str, object]:
+    matrix = np.asarray(values, dtype="<f4")
+    if matrix.size == 0:
+        matrix = np.empty((0, 0), dtype="<f4")
+    if matrix.ndim != 2:
+        raise ValueError("Embedding result must be a two-dimensional matrix")
+    contiguous = np.ascontiguousarray(matrix, dtype="<f4")
+    return {
+        "encoding": "base64-f32le",
+        "rows": int(contiguous.shape[0]),
+        "dimensions": int(contiguous.shape[1]),
+        "data": base64.b64encode(contiguous.tobytes()).decode("ascii"),
+    }
+
+
+def _packed_float32_vector(values: object) -> dict[str, object]:
+    vector = np.asarray(values, dtype="<f4")
+    if vector.ndim != 1:
+        raise ValueError("Embedding result must be a one-dimensional vector")
+    contiguous = np.ascontiguousarray(vector, dtype="<f4")
+    return {
+        "encoding": "base64-f32le",
+        "dimensions": int(contiguous.shape[0]),
+        "data": base64.b64encode(contiguous.tobytes()).decode("ascii"),
+    }
+
+
 def _handle(runtime: ModelRuntime, payload: dict[str, Any]) -> object:
     operation = _require_string(payload, "operation")
     if operation == "health":
@@ -51,13 +81,25 @@ def _handle(runtime: ModelRuntime, payload: dict[str, Any]) -> object:
     if operation == "model_info":
         return runtime.model_info()
     if operation == "embed_documents":
-        return {"vectors": runtime.embed_documents(_require_strings(payload, "texts"))}
+        return {
+            "vectors": _packed_float32_matrix(
+                runtime.embed_documents(_require_strings(payload, "texts"))
+            )
+        }
     if operation == "embed_queries":
-        return {"vectors": runtime.embed_queries(_require_strings(payload, "texts"))}
+        return {
+            "vectors": _packed_float32_matrix(
+                runtime.embed_queries(_require_strings(payload, "texts"))
+            )
+        }
     if operation == "count_tokens":
         return {"counts": runtime.count_tokens(_require_strings(payload, "texts"))}
     if operation == "embed_query":
-        return {"vector": runtime.embed_query(_require_string(payload, "text"))}
+        return {
+            "vector": _packed_float32_vector(
+                runtime.embed_query(_require_string(payload, "text"))
+            )
+        }
     if operation == "rerank":
         return {
             "scores": runtime.rerank(

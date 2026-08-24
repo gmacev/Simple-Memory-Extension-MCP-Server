@@ -2,7 +2,11 @@ import { createHash, type Hash } from 'node:crypto';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
-import { InferenceScheduler, type InferenceSchedulerSnapshot } from './inference-scheduler.js';
+import {
+  type EmbeddingVector,
+  InferenceScheduler,
+  type InferenceSchedulerSnapshot,
+} from './inference-scheduler.js';
 import { ModelWorkerTransport } from './worker-transport.js';
 
 const modelHealthSchema = z.object({
@@ -63,7 +67,7 @@ export class ModelClient {
   private readonly scheduler: InferenceScheduler;
   private embeddingProfilePromise: Promise<EmbeddingModelProfile> | null = null;
   private rerankProfilePromise: Promise<RerankProfile> | null = null;
-  private readonly queryEmbeddingCache = new Map<string, Promise<number[]>>();
+  private readonly queryEmbeddingCache = new Map<string, Promise<EmbeddingVector>>();
   private readonly rerankCache = new Map<string, Promise<number[]>>();
 
   public constructor(config: AppConfig, logger: Logger, forwardWorkerStderr = false) {
@@ -109,7 +113,7 @@ export class ModelClient {
     return pending;
   }
 
-  public embedDocuments(texts: string[]): Promise<number[][]> {
+  public embedDocuments(texts: string[]): Promise<EmbeddingVector[]> {
     return this.scheduler.embedDocuments(texts);
   }
 
@@ -117,7 +121,7 @@ export class ModelClient {
     return this.scheduler.countTokens(texts);
   }
 
-  public embedQuery(text: string): Promise<number[]> {
+  public embedQuery(text: string): Promise<EmbeddingVector> {
     const key = createHash('sha256').update(text, 'utf8').digest('hex');
     const cached = this.queryEmbeddingCache.get(key);
     if (cached) {

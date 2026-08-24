@@ -4,18 +4,40 @@ import base64
 import struct
 from typing import Any
 
-from simple_memory_models.worker import _handle
+from simple_memory_models.worker_protocol import handle_request
+
+
+class FakeFloat32Array:
+    def __init__(self, shape: tuple[int, ...], values: list[float]) -> None:
+        self.shape = shape
+        self.values = values
+        self.ndim = len(shape)
+        self.size = len(values)
+
+    def astype(self, dtype: str, *, copy: bool) -> FakeFloat32Array:
+        assert dtype == "<f4"
+        assert copy is False
+        return self
+
+    def tobytes(self, order: str = "C") -> bytes:
+        assert order == "C"
+        return struct.pack(f"<{len(self.values)}f", *self.values)
 
 
 class FakeRuntime:
-    def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        return [[float(index), float(len(text))] for index, text in enumerate(texts)]
+    def embed_queries(self, texts: list[str]) -> FakeFloat32Array:
+        if not texts:
+            return FakeFloat32Array((0, 0), [])
+        values = [value for index, text in enumerate(texts) for value in (index, len(text))]
+        return FakeFloat32Array((len(texts), 2), [float(value) for value in values])
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [[float(len(text))] for text in texts]
+    def embed_documents(self, texts: list[str]) -> FakeFloat32Array:
+        if not texts:
+            return FakeFloat32Array((0, 0), [])
+        return FakeFloat32Array((len(texts), 1), [float(len(text)) for text in texts])
 
-    def embed_query(self, text: str) -> list[float]:
-        return [float(len(text)), 7.0]
+    def embed_query(self, text: str) -> FakeFloat32Array:
+        return FakeFloat32Array((2,), [float(len(text)), 7.0])
 
     def count_tokens(self, texts: list[str]) -> list[int]:
         return [len(text) for text in texts]
@@ -26,7 +48,7 @@ class FakeRuntime:
 
 def expect_error(payload: dict[str, Any]) -> None:
     try:
-        _handle(FakeRuntime(), payload)  # type: ignore[arg-type]
+        handle_request(FakeRuntime(), payload)
     except ValueError:
         return
     raise AssertionError(f"Expected malformed payload to fail: {payload!r}")
@@ -57,13 +79,13 @@ def unpack_vector(payload: object) -> tuple[int, tuple[float, ...]]:
 
 
 runtime = FakeRuntime()
-queries = _handle(runtime, {"operation": "embed_queries", "texts": ["a", "bbb"]})
+queries = handle_request(runtime, {"operation": "embed_queries", "texts": ["a", "bbb"]})
 assert isinstance(queries, dict)
 assert unpack_matrix(queries["vectors"]) == (2, 2, (0.0, 1.0, 1.0, 3.0))
-empty_queries = _handle(runtime, {"operation": "embed_queries", "texts": []})
+empty_queries = handle_request(runtime, {"operation": "embed_queries", "texts": []})
 assert isinstance(empty_queries, dict)
 assert unpack_matrix(empty_queries["vectors"]) == (0, 0, ())
-query = _handle(runtime, {"operation": "embed_query", "text": "abcd"})
+query = handle_request(runtime, {"operation": "embed_query", "text": "abcd"})
 assert isinstance(query, dict)
 assert unpack_vector(query["vector"]) == (2, (4.0, 7.0))
 
@@ -71,16 +93,14 @@ pairs = [
     {"query": "q1", "document": "d1"},
     {"query": "q2", "document": "d2"},
 ]
-assert _handle(runtime, {"operation": "rerank_pairs", "pairs": pairs}) == {
+assert handle_request(runtime, {"operation": "rerank_pairs", "pairs": pairs}) == {
     "scores": [0.0, 1.0]
 }
-assert _handle(runtime, {"operation": "rerank_pairs", "pairs": []}) == {"scores": []}
+assert handle_request(runtime, {"operation": "rerank_pairs", "pairs": []}) == {"scores": []}
 
 expect_error({"operation": "embed_queries", "texts": ["valid", 2]})
 expect_error({"operation": "rerank_pairs", "pairs": [{"query": "q"}]})
-expect_error(
-    {"operation": "rerank_pairs", "pairs": [{"query": "", "document": "d"}]}
-)
+expect_error({"operation": "rerank_pairs", "pairs": [{"query": "", "document": "d"}]})
 expect_error(
     {
         "operation": "rerank_pairs",

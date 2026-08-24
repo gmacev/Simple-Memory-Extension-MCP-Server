@@ -11,6 +11,8 @@ import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from .tokenization import count_token_lengths
+
 DEFAULT_EMBEDDING_MODEL = "codefuse-ai/F2LLM-v2-330M"
 DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 DEFAULT_EMBEDDING_REVISION = "1b8f03017b9f12220a3ab3a1d0b1fbe441cede93"
@@ -172,20 +174,7 @@ class ModelRuntime:
             return self._tokenizer
 
     def count_tokens(self, texts: list[str]) -> list[int]:
-        if not texts:
-            return []
-        tokenizer = self._get_tokenizer()
-        encoded = tokenizer(
-            texts,
-            add_special_tokens=True,
-            truncation=False,
-            padding=False,
-            return_length=True,
-        )
-        lengths = encoded.get("length")
-        if not isinstance(lengths, list) or len(lengths) != len(texts):
-            raise RuntimeError("Tokenizer returned an invalid length batch")
-        return [int(length) for length in lengths]
+        return count_token_lengths(self._get_tokenizer(), texts) if texts else []
 
     def embed_documents(self, texts: list[str]) -> np.ndarray:
         if not texts:

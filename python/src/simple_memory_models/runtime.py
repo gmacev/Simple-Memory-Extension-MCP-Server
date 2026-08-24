@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
+import numpy as np
 import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -171,14 +172,24 @@ class ModelRuntime:
             return self._tokenizer
 
     def count_tokens(self, texts: list[str]) -> list[int]:
-        tokenizer = self._get_tokenizer()
-        return [
-            len(tokenizer.encode(text, add_special_tokens=True, truncation=False)) for text in texts
-        ]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        tokenizer = self._get_tokenizer()
+        encoded = tokenizer(
+            texts,
+            add_special_tokens=True,
+            truncation=False,
+            padding=False,
+            return_length=True,
+        )
+        lengths = encoded.get("length")
+        if not isinstance(lengths, list) or len(lengths) != len(texts):
+            raise RuntimeError("Tokenizer returned an invalid length batch")
+        return [int(length) for length in lengths]
+
+    def embed_documents(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.empty((0, 0), dtype=np.float32)
         model = self._get_embedding()
         vectors = model.encode(
             texts,
@@ -187,13 +198,13 @@ class ModelRuntime:
             convert_to_numpy=True,
             show_progress_bar=False,
         )
-        return vectors.astype("float32", copy=False).tolist()
+        return vectors.astype("float32", copy=False)
 
-    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
         if not texts:
-            return []
+            return np.empty((0, 0), dtype=np.float32)
         if len(texts) == 1:
-            return [self.embed_query(texts[0])]
+            return self.embed_query(texts[0])[None, :]
         model = self._get_embedding()
         prompt = f"Instruct: {self.config.query_instruction}\nQuery: "
         vectors = model.encode(
@@ -204,9 +215,9 @@ class ModelRuntime:
             convert_to_numpy=True,
             show_progress_bar=False,
         )
-        return vectors.astype("float32", copy=False).tolist()
+        return vectors.astype("float32", copy=False)
 
-    def embed_query(self, text: str) -> list[float]:
+    def embed_query(self, text: str) -> np.ndarray:
         model = self._get_embedding()
         prompt = f"Instruct: {self.config.query_instruction}\nQuery: "
         vector = model.encode(
@@ -217,7 +228,7 @@ class ModelRuntime:
             convert_to_numpy=True,
             show_progress_bar=False,
         )[0]
-        return vector.astype("float32", copy=False).tolist()
+        return vector.astype("float32", copy=False)
 
     def rerank_pairs(self, pairs: list[tuple[str, str]]) -> list[float]:
         if not pairs:

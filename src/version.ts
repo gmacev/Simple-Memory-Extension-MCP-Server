@@ -1,1 +1,1 @@
-export const SIMPLE_MEMORY_VERSION = '3.9.0';
+export const SIMPLE_MEMORY_VERSION = '3.9.1';

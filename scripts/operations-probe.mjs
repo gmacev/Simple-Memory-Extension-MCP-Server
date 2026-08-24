@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { createMemoryService } from '../dist/application/create-service.js';
 import { loadConfig } from '../dist/config.js';
 import { backupDatabase, restoreDatabase } from '../dist/operations/database-operations.js';
@@ -86,6 +87,12 @@ async function run() {
   const backupPath = path.join(dataDir, 'backups', 'known-good.db');
   let backup;
   try {
+    const globalSpace = service.listSpaces({ id: 'default' }).items[0];
+    assert(globalSpace?.name === 'Global', 'default space must advertise its global role');
+    assert(
+      globalSpace.description === 'Global memory shared across contexts.',
+      'default space must describe its cross-context scope',
+    );
     first = await service.createMemory({
       title: 'Backup baseline',
       content: { state: 'preserved' },
@@ -136,8 +143,25 @@ async function run() {
     'restore must preserve a safety backup of the replaced database',
   );
 
+  const legacyDatabase = new Database(config.databasePath);
+  try {
+    legacyDatabase
+      .prepare(
+        "UPDATE spaces SET name = 'Default', description = 'Default memory isolation space' WHERE id = 'default'",
+      )
+      .run();
+  } finally {
+    legacyDatabase.close();
+  }
+
   service = createMemoryService(config);
   try {
+    const normalizedGlobalSpace = service.listSpaces({ id: 'default' }).items[0];
+    assert(normalizedGlobalSpace?.name === 'Global', 'legacy default space name must be updated');
+    assert(
+      normalizedGlobalSpace.description === 'Global memory shared across contexts.',
+      'legacy default space description must be updated',
+    );
     assert(service.getMemory(first.id).id === first.id, 'baseline memory must survive restore');
     let missing = false;
     try {

@@ -441,8 +441,11 @@ export class MemoryStore {
   private ensureDefaultSpace(): void {
     this.database
       .prepare(
-        `INSERT OR IGNORE INTO spaces(id, name, description, metadata_json, created_at)
-         VALUES ('default', 'Default', 'Default memory isolation space', '{}', ?)`,
+        `INSERT INTO spaces(id, name, description, metadata_json, created_at)
+         VALUES ('default', 'Global', 'Global memory shared across contexts.', '{}', ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           description = excluded.description`,
       )
       .run(now());
   }

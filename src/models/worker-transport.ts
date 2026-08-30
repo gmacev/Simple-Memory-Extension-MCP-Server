@@ -3,16 +3,19 @@ import { createInterface, type Interface } from 'node:readline';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
+import { compileSchema } from '../validation.js';
 import { ModelWorkerFailureError } from './inference-errors.js';
 
-const workerResponseSchema = z.discriminatedUnion('ok', [
-  z.object({ id: z.string(), ok: z.literal(true), result: z.unknown() }),
-  z.object({
-    id: z.string(),
-    ok: z.literal(false),
-    error: z.object({ type: z.string().optional(), message: z.string().optional() }),
-  }),
-]);
+const workerResponseSchema = compileSchema(
+  z.discriminatedUnion('ok', [
+    z.object({ id: z.string(), ok: z.literal(true), result: z.unknown() }),
+    z.object({
+      id: z.string(),
+      ok: z.literal(false),
+      error: z.object({ type: z.string().optional(), message: z.string().optional() }),
+    }),
+  ]),
+);
 
 interface PendingDispatch {
   id: string;

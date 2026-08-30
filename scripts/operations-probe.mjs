@@ -55,6 +55,14 @@ function probeCliSurface() {
   assert(help.stdout.includes('memoryctl backup'), 'CLI help must document backup');
   assert(help.stdout.includes('memoryctl restore'), 'CLI help must document restore');
 
+  const jitlessVersion = spawnSync(
+    process.execPath,
+    ['--disallow-code-generation-from-strings', path.join(root, 'dist', 'cli.js'), '--version'],
+    { cwd: root, env: environment, encoding: 'utf8' },
+  );
+  assert(jitlessVersion.status === 0, 'CLI must remain available when code generation is disabled');
+  assert(jitlessVersion.stdout.trim() === '3.9.4', 'jitless CLI must report the current version');
+
   const show = spawnSync(process.execPath, [path.join(root, 'dist', 'cli.js'), 'config', 'show'], {
     cwd: root,
     env: environment,

@@ -1,5 +1,6 @@
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { compileSchema } from '../validation.js';
 
 export const accessModes = ['open', 'fixed', 'oauth'] as const;
 export const spaceAccessLevels = ['read', 'write', 'manage'] as const;
@@ -32,16 +33,20 @@ export interface OAuthAccessContext extends AccessContext {
   principal: string;
 }
 
-const accessClaimSchema = z.object({
-  spaces: z.record(z.string().min(1).max(200), z.enum(spaceAccessLevels)),
-});
+const accessClaimSchema = compileSchema(
+  z.object({
+    spaces: z.record(z.string().min(1).max(200), z.enum(spaceAccessLevels)),
+  }),
+);
 
-const authenticatedContextSchema = z.object({
-  mode: z.literal('oauth'),
-  principal: z.string().min(1),
-  globalLevel: z.enum(spaceAccessLevels),
-  grants: z.record(z.string(), z.enum(spaceAccessLevels)),
-});
+const authenticatedContextSchema = compileSchema(
+  z.object({
+    mode: z.literal('oauth'),
+    principal: z.string().min(1),
+    globalLevel: z.enum(spaceAccessLevels),
+    grants: z.record(z.string(), z.enum(spaceAccessLevels)),
+  }),
+);
 
 const levelRank: Record<SpaceAccessLevel, number> = {
   read: 1,

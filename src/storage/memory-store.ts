@@ -45,6 +45,7 @@ import type {
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
+import { compileSchema } from '../validation.js';
 import { applyMigrations, type MigrationStatus } from './migrations/index.js';
 
 type Row = Record<string, unknown>;
@@ -200,14 +201,16 @@ function assertTemporalRange(validFrom: string | undefined, validTo: string | un
   }
 }
 
-const listCursorSchema = z.object({ updatedAt: z.string(), id: z.string() });
-const feedbackCursorSchema = z.object({ createdAt: z.string(), id: z.string() });
-const spaceCursorSchema = z.object({
-  rank: z.number().int().min(0),
-  name: z.string(),
-  id: z.string(),
-  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
-});
+const listCursorSchema = compileSchema(z.object({ updatedAt: z.string(), id: z.string() }));
+const feedbackCursorSchema = compileSchema(z.object({ createdAt: z.string(), id: z.string() }));
+const spaceCursorSchema = compileSchema(
+  z.object({
+    rank: z.number().int().min(0),
+    name: z.string(),
+    id: z.string(),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  }),
+);
 
 function decodeListCursor(cursor: string): z.infer<typeof listCursorSchema> {
   try {

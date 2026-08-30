@@ -2,6 +2,7 @@ import { createHash, type Hash } from 'node:crypto';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
+import { compileSchema } from '../validation.js';
 import {
   type EmbeddingVector,
   InferenceScheduler,
@@ -9,23 +10,25 @@ import {
 } from './inference-scheduler.js';
 import { ModelWorkerTransport } from './worker-transport.js';
 
-const modelHealthSchema = z.object({
-  status: z.string(),
-  pid: z.number().int(),
-  embedding_model: z.string(),
-  embedding_revision: z.string(),
-  reranker_model: z.string(),
-  reranker_revision: z.string(),
-  query_instruction_hash: z.string(),
-  rerank_instruction_hash: z.string(),
-  device: z.string(),
-  device_name: z.string(),
-  torch_version: z.string(),
-  torch_cuda_version: z.string().nullable(),
-  embedding_dimension: z.number().int().nullable(),
-  embedding_loaded: z.boolean(),
-  reranker_loaded: z.boolean(),
-});
+const modelHealthSchema = compileSchema(
+  z.object({
+    status: z.string(),
+    pid: z.number().int(),
+    embedding_model: z.string(),
+    embedding_revision: z.string(),
+    reranker_model: z.string(),
+    reranker_revision: z.string(),
+    query_instruction_hash: z.string(),
+    rerank_instruction_hash: z.string(),
+    device: z.string(),
+    device_name: z.string(),
+    torch_version: z.string(),
+    torch_cuda_version: z.string().nullable(),
+    embedding_dimension: z.number().int().nullable(),
+    embedding_loaded: z.boolean(),
+    reranker_loaded: z.boolean(),
+  }),
+);
 
 export type ModelHealth = z.infer<typeof modelHealthSchema>;
 export type EmbeddingModelProfile = Pick<

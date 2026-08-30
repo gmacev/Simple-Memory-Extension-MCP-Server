@@ -23,12 +23,15 @@ import type {
   EmbeddingIndexProfile,
   MemoryStore,
 } from '../storage/memory-store.js';
+import { compileSchema } from '../validation.js';
 
-const traversalCursorSchema = z.object({
-  offset: z.number().int().min(1).max(10_000),
-  atTime: z.string(),
-  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
-});
+const traversalCursorSchema = compileSchema(
+  z.object({
+    offset: z.number().int().min(1).max(10_000),
+    atTime: z.string(),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  }),
+);
 
 const DEFAULT_TRAVERSAL_LIMIT = 20;
 const MAX_TRAVERSAL_LIMIT = 200;

@@ -2,6 +2,7 @@ import { endianness } from 'node:os';
 import * as z from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
+import { compileSchema } from '../validation.js';
 import {
   InferenceCapacityError,
   InferenceExecutionTimeoutError,
@@ -19,9 +20,11 @@ const packedFloat32MatrixSchema = z.object({
   dimensions: z.number().int().nonnegative(),
   data: canonicalBase64Schema,
 });
-const embeddingResponseSchema = z.object({ vectors: packedFloat32MatrixSchema });
-const countResponseSchema = z.object({ counts: z.array(z.number().int().nonnegative()) });
-const rerankResponseSchema = z.object({ scores: z.array(z.number()) });
+const embeddingResponseSchema = compileSchema(z.object({ vectors: packedFloat32MatrixSchema }));
+const countResponseSchema = compileSchema(
+  z.object({ counts: z.array(z.number().int().nonnegative()) }),
+);
+const rerankResponseSchema = compileSchema(z.object({ scores: z.array(z.number()) }));
 
 const TOKEN_COUNT_BATCH_SIZE = 64;
 const RERANK_SLICE_CHARACTER_BUDGET = 32_000;

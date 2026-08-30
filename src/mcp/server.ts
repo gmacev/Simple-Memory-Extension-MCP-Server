@@ -25,6 +25,7 @@ import type {
   SearchResponse,
   SourceInput,
 } from '../domain/types.js';
+import { compileSchema } from '../validation.js';
 import { SIMPLE_MEMORY_VERSION } from '../version.js';
 import { type MemoryInputArguments, toolInputSchemas } from './input-schemas.js';
 import { toolOutputSchemas } from './output-schemas.js';
@@ -422,7 +423,9 @@ function compactSearch(
   return asJson(payload);
 }
 
-const historyCursorSchema = z.object({ beforeRevisionNumber: z.number().int().positive() });
+const historyCursorSchema = compileSchema(
+  z.object({ beforeRevisionNumber: z.number().int().positive() }),
+);
 
 function decodeHistoryCursor(cursor: string): number {
   try {

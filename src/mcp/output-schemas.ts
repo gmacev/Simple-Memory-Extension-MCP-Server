@@ -1,4 +1,5 @@
 import * as z from 'zod/v4';
+import { compileSchema } from '../validation.js';
 
 const uuidSchema = z.string().uuid();
 const isoDateTimeSchema = z.iso.datetime({ offset: true });
@@ -117,38 +118,44 @@ const traversalMemorySummaryOutputSchema = z
   .object({ ...memorySummaryBaseShape, state: memoryStateSchema })
   .strict();
 
-const mutationAcknowledgementOutputSchema = z
-  .object({
-    id: uuidSchema,
-    spaceId: z.string(),
-    state: memoryStateSchema,
-    revisionId: uuidSchema,
-    indexStatus: indexStatusSchema,
-    recordedAt: isoDateTimeSchema,
-    logicalKey: z.string().optional(),
-  })
-  .strict();
+const mutationAcknowledgementOutputSchema = compileSchema(
+  z
+    .object({
+      id: uuidSchema,
+      spaceId: z.string(),
+      state: memoryStateSchema,
+      revisionId: uuidSchema,
+      indexStatus: indexStatusSchema,
+      recordedAt: isoDateTimeSchema,
+      logicalKey: z.string().optional(),
+    })
+    .strict(),
+);
 
-const lifecycleAcknowledgementOutputSchema = z
-  .object({
-    id: uuidSchema,
-    state: memoryStateSchema,
-    updatedAt: isoDateTimeSchema,
-  })
-  .strict();
+const lifecycleAcknowledgementOutputSchema = compileSchema(
+  z
+    .object({
+      id: uuidSchema,
+      state: memoryStateSchema,
+      updatedAt: isoDateTimeSchema,
+    })
+    .strict(),
+);
 
-const deletionAcknowledgementOutputSchema = z
-  .object({ id: uuidSchema, deleted: z.literal(true) })
-  .strict();
+const deletionAcknowledgementOutputSchema = compileSchema(
+  z.object({ id: uuidSchema, deleted: z.literal(true) }).strict(),
+);
 
-const feedbackAcknowledgementOutputSchema = z
-  .object({
-    id: uuidSchema,
-    memoryId: uuidSchema,
-    revisionId: uuidSchema.optional(),
-    createdAt: isoDateTimeSchema,
-  })
-  .strict();
+const feedbackAcknowledgementOutputSchema = compileSchema(
+  z
+    .object({
+      id: uuidSchema,
+      memoryId: uuidSchema,
+      revisionId: uuidSchema.optional(),
+      createdAt: isoDateTimeSchema,
+    })
+    .strict(),
+);
 
 const searchScoreOutputSchema = z
   .object({
@@ -292,7 +299,7 @@ const inferenceSchedulerOutputSchema = z
   .strict();
 
 export const toolOutputSchemas = {
-  space_create: z.object({ id: z.string(), createdAt: isoDateTimeSchema }).strict(),
+  space_create: compileSchema(z.object({ id: z.string(), createdAt: isoDateTimeSchema }).strict()),
   space_list: z
     .object({
       items: z.array(
@@ -309,26 +316,30 @@ export const toolOutputSchemas = {
       nextCursor: cursorSchema.optional(),
     })
     .strict(),
-  space_delete: z
-    .object({
-      id: z.string(),
-      deleted: z.literal(true),
-      deletedAt: isoDateTimeSchema.nullable(),
-    })
-    .strict(),
-  space_restore: z.object({ id: z.string(), restored: z.literal(true) }).strict(),
+  space_delete: compileSchema(
+    z
+      .object({
+        id: z.string(),
+        deleted: z.literal(true),
+        deletedAt: isoDateTimeSchema.nullable(),
+      })
+      .strict(),
+  ),
+  space_restore: compileSchema(z.object({ id: z.string(), restored: z.literal(true) }).strict()),
   memory_create: mutationAcknowledgementOutputSchema,
   memory_revise: mutationAcknowledgementOutputSchema,
-  memory_merge: z
-    .object({
-      operationId: uuidSchema,
-      canonicalMemoryId: uuidSchema,
-      canonicalRevisionId: uuidSchema,
-      mergedMemoryIds: z.array(uuidSchema),
-      createdAt: isoDateTimeSchema,
-      redirectedMemoryCount: z.number().int().nonnegative().optional(),
-    })
-    .strict(),
+  memory_merge: compileSchema(
+    z
+      .object({
+        operationId: uuidSchema,
+        canonicalMemoryId: uuidSchema,
+        canonicalRevisionId: uuidSchema,
+        mergedMemoryIds: z.array(uuidSchema),
+        createdAt: isoDateTimeSchema,
+        redirectedMemoryCount: z.number().int().nonnegative().optional(),
+      })
+      .strict(),
+  ),
   memory_get: completeMemoryOutputSchema,
   memory_get_by_key: z
     .object({
@@ -342,9 +353,11 @@ export const toolOutputSchemas = {
       nextCursor: cursorSchema.optional(),
     })
     .strict(),
-  memory_list: z
-    .object({ items: z.array(memorySummaryOutputSchema), nextCursor: cursorSchema.optional() })
-    .strict(),
+  memory_list: compileSchema(
+    z
+      .object({ items: z.array(memorySummaryOutputSchema), nextCursor: cursorSchema.optional() })
+      .strict(),
+  ),
   memory_search: z
     .object({
       results: z.array(searchResultOutputSchema),
@@ -367,10 +380,12 @@ export const toolOutputSchemas = {
   memory_archive: lifecycleAcknowledgementOutputSchema,
   memory_restore: lifecycleAcknowledgementOutputSchema,
   memory_delete: deletionAcknowledgementOutputSchema,
-  memory_link: z.object({ id: uuidSchema, createdAt: isoDateTimeSchema }).strict(),
-  memory_unlink: z
-    .object({ id: uuidSchema, deleted: z.literal(true), deletedAt: isoDateTimeSchema.optional() })
-    .strict(),
+  memory_link: compileSchema(z.object({ id: uuidSchema, createdAt: isoDateTimeSchema }).strict()),
+  memory_unlink: compileSchema(
+    z
+      .object({ id: uuidSchema, deleted: z.literal(true), deletedAt: isoDateTimeSchema.optional() })
+      .strict(),
+  ),
   memory_traverse: z
     .object({
       items: z.array(
@@ -395,27 +410,29 @@ export const toolOutputSchemas = {
   memory_feedback_list: z
     .object({ items: z.array(feedbackListItemOutputSchema), nextCursor: cursorSchema.optional() })
     .strict(),
-  memory_status: z
-    .object({
-      database: z.string().optional(),
-      schemaVersion: z.number().int().nonnegative(),
-      vectorAvailable: z.boolean(),
-      memories: memoryCountsOutputSchema,
-      spaces: z.number().int().nonnegative().optional(),
-      revisions: z.number().int().nonnegative().optional(),
-      segments: z.number().int().nonnegative().optional(),
-      stateEvents: z.number().int().nonnegative().optional(),
-      modelProfiles: z.number().int().nonnegative().optional(),
-      pendingJobs: z.number().int().nonnegative(),
-      logicalKeys: z.number().int().nonnegative().optional(),
-      merges: mergeStatusOutputSchema.optional(),
-      modelsEnabled: z.boolean(),
-      modelLauncherPid: z.number().int().nullable().optional(),
-      modelWorkerPid: z.number().int().nullable().optional(),
-      modelWorkerStarts: z.number().int().nonnegative().optional(),
-      inferenceScheduler: inferenceSchedulerOutputSchema.optional(),
-      modelHealth: modelHealthOutputSchema.optional(),
-      modelError: z.string().optional(),
-    })
-    .strict(),
+  memory_status: compileSchema(
+    z
+      .object({
+        database: z.string().optional(),
+        schemaVersion: z.number().int().nonnegative(),
+        vectorAvailable: z.boolean(),
+        memories: memoryCountsOutputSchema,
+        spaces: z.number().int().nonnegative().optional(),
+        revisions: z.number().int().nonnegative().optional(),
+        segments: z.number().int().nonnegative().optional(),
+        stateEvents: z.number().int().nonnegative().optional(),
+        modelProfiles: z.number().int().nonnegative().optional(),
+        pendingJobs: z.number().int().nonnegative(),
+        logicalKeys: z.number().int().nonnegative().optional(),
+        merges: mergeStatusOutputSchema.optional(),
+        modelsEnabled: z.boolean(),
+        modelLauncherPid: z.number().int().nullable().optional(),
+        modelWorkerPid: z.number().int().nullable().optional(),
+        modelWorkerStarts: z.number().int().nonnegative().optional(),
+        inferenceScheduler: inferenceSchedulerOutputSchema.optional(),
+        modelHealth: modelHealthOutputSchema.optional(),
+        modelError: z.string().optional(),
+      })
+      .strict(),
+  ),
 } as const;

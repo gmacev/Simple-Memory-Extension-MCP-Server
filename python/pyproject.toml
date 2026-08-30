@@ -1,6 +1,6 @@
 [project]
 name = "simple-memory-models"
-version = "3.9.3"
+version = "3.9.4"
 description = "Persistent embedding and reranking worker for Simple Memory"
 requires-python = ">=3.12,<3.13"
 dependencies = [

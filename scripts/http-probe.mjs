@@ -151,7 +151,7 @@ async function probeOpenLoopbackServer(port) {
     });
     assert(forbidden.status === 403, 'an unapproved Origin header must be rejected');
     client = new Client(
-      { name: 'simple-memory-http-open-probe', version: '3.9.2' },
+      { name: 'simple-memory-http-open-probe', version: '3.9.3' },
       { versionNegotiation: { mode: 'auto' } },
     );
     await client.connect(

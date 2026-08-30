@@ -1,6 +1,6 @@
 {
   "name": "simple-memory-extension-mcp-server",
-  "version": "3.9.2",
+  "version": "3.9.3",
   "description": "A local-first, generic persistent memory layer for MCP agents",
   "repository": {
     "type": "git",
@@ -71,7 +71,7 @@
     "express": "5.2.1",
     "jose": "6.2.3",
     "sqlite-vec": "0.1.9",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.4",

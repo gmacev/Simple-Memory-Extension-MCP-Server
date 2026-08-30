@@ -22,7 +22,7 @@ function environment() {
 }
 
 const client = new Client(
-  { name: 'simple-memory-structured-output-probe', version: '3.9.2' },
+  { name: 'simple-memory-structured-output-probe', version: '3.9.3' },
   { versionNegotiation: { mode: 'auto', probe: { timeoutMs: 5_000 } } },
 );
 const transport = new StdioClientTransport({

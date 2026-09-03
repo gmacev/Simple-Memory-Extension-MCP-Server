@@ -22,7 +22,7 @@ function environment() {
 }
 
 const client = new Client(
-  { name: 'simple-memory-structured-output-probe', version: '3.9.4' },
+  { name: 'simple-memory-structured-output-probe', version: '3.9.5' },
   { versionNegotiation: { mode: 'auto', probe: { timeoutMs: 5_000 } } },
 );
 const transport = new StdioClientTransport({
@@ -34,6 +34,39 @@ const transport = new StdioClientTransport({
 });
 
 let advertisedTools = new Map();
+
+function resolveLocalReference(root, reference) {
+  if (reference === '#') return root;
+  if (!reference.startsWith('#/')) return undefined;
+  let value = root;
+  for (const encodedPart of reference.slice(2).split('/')) {
+    if (typeof value !== 'object' || value === null) return undefined;
+    const part = encodedPart.replaceAll('~1', '/').replaceAll('~0', '~');
+    value = value[part];
+  }
+  return value;
+}
+
+function containsRecursiveReference(schema) {
+  const active = new Set();
+  const visit = (value) => {
+    if (typeof value !== 'object' || value === null) return false;
+    if (active.has(value)) return true;
+    active.add(value);
+
+    if (!Array.isArray(value) && typeof value.$ref === 'string') {
+      const target = resolveLocalReference(schema, value.$ref);
+      if (target !== undefined && visit(target)) return true;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== '$ref' && visit(child)) return true;
+    }
+    active.delete(value);
+    return false;
+  };
+  return visit(schema);
+}
 
 async function call(name, arguments_) {
   const response = await client.callTool({ name, arguments: arguments_ });
@@ -69,6 +102,16 @@ try {
   assert.equal(advertisedTools.size, 21, 'all Simple Memory tools must be advertised');
   for (const tool of advertisedTools.values()) {
     assert(tool.outputSchema, `${tool.name} must advertise outputSchema`);
+    assert.equal(
+      containsRecursiveReference(tool.inputSchema),
+      false,
+      `${tool.name} inputSchema must not contain recursive references`,
+    );
+    assert.equal(
+      containsRecursiveReference(tool.outputSchema),
+      false,
+      `${tool.name} outputSchema must not contain recursive references`,
+    );
     z.fromJSONSchema(tool.outputSchema);
   }
 
@@ -127,9 +170,13 @@ try {
     spaceId: space.id,
     title: 'Structured canonical memory',
     kind: 'protocol-probe',
-    content: { marker: 'STRUCTURED-OUTPUT-PROBE', version: 2 },
+    content: {
+      marker: 'STRUCTURED-OUTPUT-PROBE',
+      version: 2,
+      nested: { levels: [{ values: [null, true, 17, 'deep-json'] }] },
+    },
     tags: ['structured-output'],
-    metadata: { owner: 'probe' },
+    metadata: { owner: 'probe', nested: { retained: ['yes'] } },
     sources: [
       {
         uri: 'urn:simple-memory:structured-output',
@@ -145,7 +192,13 @@ try {
   assert.deepEqual(memory.revision.content, {
     marker: 'STRUCTURED-OUTPUT-PROBE',
     version: 2,
+    nested: { levels: [{ values: [null, true, 17, 'deep-json'] }] },
   });
+  assert.deepEqual(
+    memory.revision.metadata,
+    { owner: 'probe', nested: { retained: ['yes'] } },
+    'arbitrarily nested metadata must remain lossless',
+  );
   const historySummary = await call('memory_history', {
     memoryId: canonical.id,
     limit: 1,
@@ -263,6 +316,7 @@ try {
       toolsCalled: calledTools.size,
       structuredParity: true,
       outputSchemaValidation: true,
+      recursiveSchemas: false,
     }),
   );
 } finally {

@@ -1,10 +1,10 @@
 import * as z from 'zod/v4';
 import { compileSchema } from '../validation.js';
+import { jsonObjectOutputSchema, jsonValueOutputSchema } from './json-value-schemas.js';
 
 const uuidSchema = z.string().uuid();
 const isoDateTimeSchema = z.iso.datetime({ offset: true });
 const cursorSchema = z.string();
-const jsonObjectSchema = z.record(z.string(), z.json());
 const memoryStateSchema = z.enum(['active', 'archived']);
 const indexStatusSchema = z.enum(['pending', 'ready', 'lexical-only', 'failed']);
 const feedbackStatusSchema = z.enum(['unreviewed', 'supported', 'verified', 'needs-review']);
@@ -23,7 +23,7 @@ const sourceOutputSchema = z
     label: z.string().optional(),
     type: z.string().optional(),
     observedAt: isoDateTimeSchema.optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectOutputSchema.optional(),
   })
   .strict();
 
@@ -50,16 +50,16 @@ const revisionBaseShape = {
 const historyRevisionOutputSchema = z
   .object({
     ...revisionBaseShape,
-    content: z.json().optional(),
-    metadata: jsonObjectSchema.optional(),
+    content: jsonValueOutputSchema.optional(),
+    metadata: jsonObjectOutputSchema.optional(),
   })
   .strict();
 
 const completeRevisionOutputSchema = z
   .object({
     ...revisionBaseShape,
-    content: z.json(),
-    metadata: jsonObjectSchema.optional(),
+    content: jsonValueOutputSchema,
+    metadata: jsonObjectOutputSchema.optional(),
   })
   .strict();
 
@@ -206,7 +206,7 @@ const traversalPathStepOutputSchema = z
     toMemoryId: uuidSchema,
     validFrom: isoDateTimeSchema.optional(),
     validTo: isoDateTimeSchema.optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectOutputSchema.optional(),
   })
   .strict();
 
@@ -222,7 +222,7 @@ const feedbackListItemOutputSchema = z
     query: z.string().optional(),
     value: z.number().optional(),
     note: z.string().optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectOutputSchema.optional(),
   })
   .strict();
 
@@ -308,7 +308,7 @@ export const toolOutputSchemas = {
             id: z.string(),
             name: z.string(),
             description: z.string().optional(),
-            metadata: jsonObjectSchema.optional(),
+            metadata: jsonObjectOutputSchema.optional(),
             deletedAt: isoDateTimeSchema.optional(),
           })
           .strict(),

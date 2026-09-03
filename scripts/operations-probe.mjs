@@ -61,7 +61,7 @@ function probeCliSurface() {
     { cwd: root, env: environment, encoding: 'utf8' },
   );
   assert(jitlessVersion.status === 0, 'CLI must remain available when code generation is disabled');
-  assert(jitlessVersion.stdout.trim() === '3.9.4', 'jitless CLI must report the current version');
+  assert(jitlessVersion.stdout.trim() === '3.9.5', 'jitless CLI must report the current version');
 
   const show = spawnSync(process.execPath, [path.join(root, 'dist', 'cli.js'), 'config', 'show'], {
     cwd: root,

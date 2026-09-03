@@ -1,19 +1,22 @@
 import * as z from 'zod/v4';
 import { compileSchema } from '../validation.js';
+import { jsonObjectInputSchema, jsonValueInputSchema } from './json-value-schemas.js';
 
-const jsonObjectSchema = z.record(z.string(), z.json());
 const dateSchema = z.iso
   .datetime({ offset: true })
   .transform((value) => new Date(value).toISOString());
-const contentSchema = z.json().refine((value) => JSON.stringify(value).length <= 1_000_000, {
-  message: 'Memory content must be at most 1 MB of JSON',
-});
+const contentSchema = jsonValueInputSchema.refine(
+  (value) => JSON.stringify(value).length <= 1_000_000,
+  {
+    message: 'Memory content must be at most 1 MB of JSON',
+  },
+);
 const sourceSchema = z.object({
   uri: z.string().max(4_000).optional(),
   label: z.string().max(500).optional(),
   type: z.string().max(100).optional(),
   observedAt: dateSchema.optional(),
-  metadata: jsonObjectSchema.optional(),
+  metadata: jsonObjectInputSchema.optional(),
 });
 const feedbackScopeSchema = z.enum(['content', 'retrieval']);
 const storedFeedbackScopeSchema = z.enum(['legacy', 'content', 'retrieval']);
@@ -39,7 +42,7 @@ const memoryInputSchema = z.object({
   kind: z.string().max(100).optional(),
   content: contentSchema,
   tags: z.array(z.string().min(1).max(100)).max(100).optional(),
-  metadata: jsonObjectSchema.optional(),
+  metadata: jsonObjectInputSchema.optional(),
   sources: z.array(sourceSchema).max(100).optional(),
   salience: z.number().min(0).max(1).optional(),
   confidence: z.number().min(0).max(1).optional(),
@@ -58,7 +61,7 @@ export const toolInputSchemas = {
     id: z.string().min(1).max(200).optional(),
     name: z.string().min(1).max(200),
     description: z.string().max(2_000).optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectInputSchema.optional(),
   }),
   space_list: compileSchema(
     z.object({
@@ -95,7 +98,7 @@ export const toolInputSchemas = {
       .max(50),
     actorId: actorIdSchema.optional(),
     reason: z.string().max(4_000).optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectInputSchema.optional(),
     idempotencyKey: z.string().min(1).max(500).optional(),
   }),
   memory_get: compileSchema(
@@ -160,7 +163,7 @@ export const toolInputSchemas = {
     fromMemoryId: z.string().uuid(),
     toMemoryId: z.string().uuid(),
     relation: z.string().min(1).max(200),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectInputSchema.optional(),
     validFrom: dateSchema.optional(),
     validTo: dateSchema.optional(),
   }),
@@ -187,7 +190,7 @@ export const toolInputSchemas = {
     actorId: z.string().min(1).max(200).optional(),
     query: z.string().min(1).max(10_000).optional(),
     note: z.string().max(4_000).optional(),
-    metadata: jsonObjectSchema.optional(),
+    metadata: jsonObjectInputSchema.optional(),
     idempotencyKey: z.string().min(1).max(500).optional(),
   }),
   memory_feedback_list: compileSchema(

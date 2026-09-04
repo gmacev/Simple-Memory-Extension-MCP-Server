@@ -486,17 +486,23 @@ export function buildMcpServer(
     context: AccessContext,
     linkId: string,
     level: SpaceAccessLevel,
-  ): string | null => {
-    const spaceId = service.linkSpaceId(linkId);
-    if (spaceId === null) {
+  ): { fromSpaceId: string; toSpaceId: string } | null => {
+    const endpointSpaces = service.linkSpaceIds(linkId);
+    if (endpointSpaces === null) {
       if (authorization.protected) throw new MemoryAccessError('not-found-or-inaccessible');
       return null;
     }
-    authorization.requireSpace(context, spaceId, level, true);
-    if (service.spaceState(spaceId) !== 'active') {
+    const spaceIds = [...new Set([endpointSpaces.fromSpaceId, endpointSpaces.toSpaceId])];
+    if (spaceIds.some((spaceId) => !authorization.can(context, spaceId, 'read'))) {
       throw new MemoryAccessError('not-found-or-inaccessible');
     }
-    return spaceId;
+    for (const spaceId of spaceIds) {
+      authorization.requireSpace(context, spaceId, level, true);
+      if (service.spaceState(spaceId) !== 'active') {
+        throw new MemoryAccessError('not-found-or-inaccessible');
+      }
+    }
+    return endpointSpaces;
   };
   const server = new McpServer(
     { name: 'simple-memory', version: SIMPLE_MEMORY_VERSION },
@@ -804,6 +810,7 @@ export function buildMcpServer(
         }
       }
       const authorizedSpaceIds = requestedSpaceIds ?? authorization.spaceIds(context, 'read');
+      const readableRelationSpaceIds = authorization.spaceIds(context, 'read');
       const searchOptions = {
         query: args.query,
         ...(authorizedSpaceIds !== undefined ? { spaceIds: authorizedSpaceIds } : {}),
@@ -817,6 +824,9 @@ export function buildMcpServer(
         ...(args.atTime ? { atTime: args.atTime } : {}),
         ...(args.validAt ? { validAt: args.validAt } : {}),
         ...(args.expandRelations !== undefined ? { expandRelations: args.expandRelations } : {}),
+        ...(readableRelationSpaceIds !== undefined
+          ? { relationSpaceIds: readableRelationSpaceIds }
+          : {}),
         ...(args.includeSourceMetadata !== undefined
           ? { includeSourceMetadata: args.includeSourceMetadata }
           : {}),
@@ -888,7 +898,7 @@ export function buildMcpServer(
     {
       title: 'Link memories',
       description:
-        'Record an explicit typed relationship between two memories in the same space. Repeating an active link is safe; use memory_merge, not this tool, for duplicates.',
+        'Record an explicit typed relationship between two memories. Cross-space links require write access to both spaces. Repeating an active link is safe; use memory_merge, not this tool, for duplicates.',
       inputSchema: toolInputSchemas.memory_link,
       outputSchema: toolOutputSchemas.memory_link,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
@@ -915,7 +925,8 @@ export function buildMcpServer(
     'memory_unlink',
     {
       title: 'Remove memory link',
-      description: 'Remove a relationship while retaining its audit history.',
+      description:
+        'Remove a relationship while retaining its audit history. Cross-space links require write access to both endpoint spaces.',
       inputSchema: toolInputSchemas.memory_unlink,
       outputSchema: toolOutputSchemas.memory_unlink,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
@@ -931,13 +942,14 @@ export function buildMcpServer(
     {
       title: 'Traverse memory relationships',
       description:
-        'Explore compact relationship paths from a memory. Filter by relationship or direction, optionally rank with a query, and set explain:true for ranking diagnostics. Keep query, filters, direction, and depth unchanged when using nextCursor.',
+        'Explore compact relationship paths from a memory, including authorized cross-space links. Inaccessible spaces are never exposed. Filter by relationship or direction, optionally rank with a query, and set explain:true for ranking diagnostics. Keep query, filters, direction, and depth unchanged when using nextCursor.',
       inputSchema: toolInputSchemas.memory_traverse,
       outputSchema: toolOutputSchemas.memory_traverse,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     },
     async (args) => {
       requireMemory(context, args.memoryId, 'read');
+      const readableSpaceIds = authorization.spaceIds(context, 'read');
       const page = await service.traverse({
         memoryId: args.memoryId,
         ...(args.maxDepth !== undefined ? { maxDepth: args.maxDepth } : {}),
@@ -947,6 +959,7 @@ export function buildMcpServer(
         ...(args.query ? { query: args.query } : {}),
         ...(args.limit !== undefined ? { limit: args.limit } : {}),
         ...(args.cursor ? { cursor: args.cursor } : {}),
+        ...(readableSpaceIds !== undefined ? { readableSpaceIds } : {}),
       });
       return result({
         items: page.items.map((entry) => ({

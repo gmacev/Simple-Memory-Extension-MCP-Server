@@ -58,6 +58,7 @@ function traversalFingerprint(options: {
   relations: string[];
   direction: MemoryLinkDirection;
   query: string | undefined;
+  readableSpaceIds: string[] | undefined;
 }): string {
   return createHash('sha256').update(JSON.stringify(options), 'utf8').digest('hex');
 }
@@ -120,8 +121,8 @@ export class MemoryService {
     return this.store.memorySpaceId(memoryId);
   }
 
-  public linkSpaceId(linkId: string): string | null {
-    return this.store.linkSpaceId(linkId);
+  public linkSpaceIds(linkId: string): ReturnType<MemoryStore['linkSpaceIds']> {
+    return this.store.linkSpaceIds(linkId);
   }
 
   public async createMemory(
@@ -244,6 +245,7 @@ export class MemoryService {
       relations,
       direction,
       query,
+      readableSpaceIds: options.readableSpaceIds?.toSorted(),
     });
     if (cursor && cursor.fingerprint !== fingerprint) {
       throw new Error('memory_traverse filters must remain unchanged while using a cursor');
@@ -259,6 +261,9 @@ export class MemoryService {
       relations,
       direction,
       maxResults: requestedResults,
+      ...(options.readableSpaceIds !== undefined
+        ? { readableSpaceIds: options.readableSpaceIds }
+        : {}),
     });
     let degraded = false;
     let degradationReason: string | undefined;

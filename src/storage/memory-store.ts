@@ -831,9 +831,14 @@ export class MemoryStore {
     return row ? String(row.space_id) : null;
   }
 
-  public linkSpaceId(linkId: string): string | null {
-    const row = this.getRow('SELECT space_id FROM memory_links WHERE id = ?', linkId);
-    return row ? String(row.space_id) : null;
+  public linkSpaceIds(linkId: string): { fromSpaceId: string; toSpaceId: string } | null {
+    const row = this.getRow(
+      'SELECT from_space_id, to_space_id FROM memory_links WHERE id = ?',
+      linkId,
+    );
+    return row
+      ? { fromSpaceId: String(row.from_space_id), toSpaceId: String(row.to_space_id) }
+      : null;
   }
 
   public reviseMemory(
@@ -2598,7 +2603,6 @@ export class MemoryStore {
   }): MemoryLink {
     const from = this.getMemory(input.fromMemoryId);
     const to = this.getMemory(input.toMemoryId);
-    if (from.spaceId !== to.spaceId) throw new Error('Links cannot cross memory spaces');
     if (from.state === 'deleted' || to.state === 'deleted') {
       throw new Error('Deleted memories cannot be linked');
     }
@@ -2615,11 +2619,13 @@ export class MemoryStore {
     const create = this.database.transaction((): MemoryLink => {
       const existing = this.getRow(
         `SELECT * FROM memory_links
-         WHERE space_id = ? AND from_memory_id = ? AND to_memory_id = ?
+         WHERE from_space_id = ? AND to_space_id = ?
+           AND from_memory_id = ? AND to_memory_id = ?
            AND relation = ? COLLATE NOCASE AND metadata_json = ?
            AND valid_from IS ? AND valid_to IS ? AND deleted_at IS NULL
          ORDER BY created_at, id LIMIT 1`,
         from.spaceId,
+        to.spaceId,
         from.id,
         to.id,
         relation,
@@ -2643,13 +2649,15 @@ export class MemoryStore {
       this.database
         .prepare(
           `INSERT INTO memory_links(
-            id, space_id, from_memory_id, to_memory_id, relation, metadata_json,
-            valid_from, valid_to, created_at, deleted_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+            id, space_id, from_space_id, to_space_id, from_memory_id, to_memory_id,
+            relation, metadata_json, valid_from, valid_to, created_at, deleted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
         )
         .run(
           link.id,
           link.spaceId,
+          from.spaceId,
+          to.spaceId,
           link.fromMemoryId,
           link.toMemoryId,
           link.relation,
@@ -2686,7 +2694,10 @@ export class MemoryStore {
       }
       throw new Error(`Link not found: ${linkId}`);
     }
-    this.assertSpace(String(existing.space_id));
+    this.assertSpace(String(existing.from_space_id));
+    if (String(existing.to_space_id) !== String(existing.from_space_id)) {
+      this.assertSpace(String(existing.to_space_id));
+    }
     if (existing.deleted_at !== null) return this.linkFromRow(existing);
     this.database
       .prepare('UPDATE memory_links SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
@@ -2695,42 +2706,25 @@ export class MemoryStore {
     return this.linkFromRow(row);
   }
 
-  public linksFor(memoryId: string, atTime = now(), limit = 100): MemoryLink[] {
+  public linksFor(
+    memoryId: string,
+    atTime = now(),
+    limit = 100,
+    readableSpaceIds?: string[],
+  ): MemoryLink[] {
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
-    const links = this.allRows(
-      `SELECT * FROM memory_links
-           WHERE (from_memory_id = ? OR to_memory_id = ?)
-             AND created_at <= ?
-             AND (deleted_at IS NULL OR deleted_at > ?)
-             AND (valid_from IS NULL OR valid_from <= ?)
-             AND (valid_to IS NULL OR valid_to > ?)
-           ORDER BY created_at, id
-           LIMIT ?`,
-      memoryId,
-      memoryId,
-      atTime,
-      atTime,
-      atTime,
-      atTime,
-      boundedLimit + 1,
-    ).map((row) => this.linkFromRow(row));
-    links.push(
-      ...this.redirectLinksForMany(
+    return (
+      this.linksForMany(
         [memoryId],
         {
           atTime,
           relations: [],
           direction: 'both',
+          ...(readableSpaceIds !== undefined ? { readableSpaceIds } : {}),
         },
-        boundedLimit + 1,
-      ),
-    );
-    return links
-      .sort(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, boundedLimit);
+        boundedLimit,
+      ).linksByMemoryId.get(memoryId) ?? []
+    ).slice(0, boundedLimit);
   }
 
   private redirectLinksForMany(
@@ -2739,6 +2733,7 @@ export class MemoryStore {
       atTime: string;
       relations: string[];
       direction: MemoryLinkDirection;
+      readableSpaceIds?: string[];
     },
     maxRows?: number,
   ): MemoryLink[] {
@@ -2759,6 +2754,10 @@ export class MemoryStore {
              OR redirect.canonical_memory_id IN (${placeholders}))`;
     const endpointParameters =
       options.direction === 'both' ? [...memoryIds, ...memoryIds] : memoryIds;
+    const readableSpaceClause =
+      options.readableSpaceIds === undefined
+        ? ''
+        : `AND source.space_id IN (${options.readableSpaceIds.map(() => '?').join(',')})`;
     return this.allRows(
       `SELECT redirect.*, source.space_id,
               operation.actor_id AS merge_actor_id,
@@ -2766,8 +2765,10 @@ export class MemoryStore {
               operation.metadata_json AS merge_metadata_json
        FROM memory_redirect_events redirect
        JOIN memories source ON source.id = redirect.source_memory_id
+       JOIN spaces source_space ON source_space.id = source.space_id AND source_space.deleted_at IS NULL
        JOIN memory_merge_operations operation ON operation.id = redirect.operation_id
        WHERE ${endpointClause}
+         ${readableSpaceClause}
          AND redirect.created_at <= ?
          AND NOT EXISTS (
            SELECT 1 FROM memory_redirect_events newer
@@ -2781,6 +2782,7 @@ export class MemoryStore {
        ORDER BY redirect.created_at, redirect.id
        ${maxRows === undefined ? '' : 'LIMIT ?'}`,
       ...endpointParameters,
+      ...(options.readableSpaceIds ?? []),
       options.atTime,
       options.atTime,
       ...(maxRows === undefined ? [] : [maxRows]),
@@ -2816,36 +2818,59 @@ export class MemoryStore {
       atTime: string;
       relations: string[];
       direction: MemoryLinkDirection;
+      readableSpaceIds?: string[];
     },
     maxRows: number,
   ): { linksByMemoryId: Map<string, MemoryLink[]>; truncated: boolean } {
     const linksByMemoryId = new Map<string, MemoryLink[]>(
       memoryIds.map((memoryId) => [memoryId, []]),
     );
-    if (memoryIds.length === 0) return { linksByMemoryId, truncated: false };
+    if (memoryIds.length === 0 || options.readableSpaceIds?.length === 0) {
+      return { linksByMemoryId, truncated: false };
+    }
     const boundedMaxRows = Math.max(1, Math.min(maxRows, 20_000));
     const placeholders = memoryIds.map(() => '?').join(',');
+    const readablePlaceholders = options.readableSpaceIds?.map(() => '?').join(',');
+    const readableFrom = readablePlaceholders
+      ? ` AND from_memory.space_id IN (${readablePlaceholders})`
+      : '';
+    const readableTo = readablePlaceholders
+      ? ` AND to_memory.space_id IN (${readablePlaceholders})`
+      : '';
     const endpointClause =
       options.direction === 'outgoing'
-        ? `from_memory_id IN (${placeholders})`
+        ? `link.from_memory_id IN (${placeholders})${readableTo}`
         : options.direction === 'incoming'
-          ? `to_memory_id IN (${placeholders})`
-          : `(from_memory_id IN (${placeholders}) OR to_memory_id IN (${placeholders}))`;
+          ? `link.to_memory_id IN (${placeholders})${readableFrom}`
+          : `((link.from_memory_id IN (${placeholders})${readableTo})
+             OR (link.to_memory_id IN (${placeholders})${readableFrom}))`;
     const endpointParameters =
-      options.direction === 'both' ? [...memoryIds, ...memoryIds] : memoryIds;
+      options.direction === 'both'
+        ? [
+            ...memoryIds,
+            ...(options.readableSpaceIds ?? []),
+            ...memoryIds,
+            ...(options.readableSpaceIds ?? []),
+          ]
+        : [...memoryIds, ...(options.readableSpaceIds ?? [])];
     const relationClause =
       options.relations.length > 0
-        ? `AND relation COLLATE NOCASE IN (${options.relations.map(() => '?').join(',')})`
+        ? `AND link.relation COLLATE NOCASE IN (${options.relations.map(() => '?').join(',')})`
         : '';
     const rows = this.allRows(
-      `SELECT * FROM memory_links
+      `SELECT link.*
+       FROM memory_links link
+       JOIN memories from_memory ON from_memory.id = link.from_memory_id
+       JOIN memories to_memory ON to_memory.id = link.to_memory_id
+       JOIN spaces from_space ON from_space.id = from_memory.space_id AND from_space.deleted_at IS NULL
+       JOIN spaces to_space ON to_space.id = to_memory.space_id AND to_space.deleted_at IS NULL
        WHERE ${endpointClause}
-         AND created_at <= ?
-         AND (deleted_at IS NULL OR deleted_at > ?)
-         AND (valid_from IS NULL OR valid_from <= ?)
-         AND (valid_to IS NULL OR valid_to > ?)
+         AND link.created_at <= ?
+         AND (link.deleted_at IS NULL OR link.deleted_at > ?)
+         AND (link.valid_from IS NULL OR link.valid_from <= ?)
+         AND (link.valid_to IS NULL OR link.valid_to > ?)
          ${relationClause}
-       ORDER BY created_at, id
+       ORDER BY link.created_at, link.id
        LIMIT ?`,
       ...endpointParameters,
       options.atTime,
@@ -2888,6 +2913,7 @@ export class MemoryStore {
     relations: string[];
     direction: MemoryLinkDirection;
     maxResults: number;
+    readableSpaceIds?: string[];
   }): { items: MemoryTraversalEntry[]; truncated: boolean } {
     this.getMemory(options.memoryId, { atTime: options.atTime });
     const discoveries: Array<{

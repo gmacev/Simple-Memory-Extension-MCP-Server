@@ -314,7 +314,12 @@ export class SearchEngine {
         .sort((left, right) => right.score.fusedScore - left.score.fusedScore)
         .slice(0, 10);
       for (const seed of seeds) {
-        for (const link of this.store.linksFor(seed.memoryId, options.validAt ?? options.atTime)) {
+        for (const link of this.store.linksFor(
+          seed.memoryId,
+          options.validAt ?? options.atTime,
+          100,
+          options.relationSpaceIds,
+        )) {
           const adjacentId =
             link.fromMemoryId === seed.memoryId ? link.toMemoryId : link.fromMemoryId;
           if (fused.has(adjacentId)) continue;

@@ -284,6 +284,7 @@ export interface SearchOptions {
   validAt?: string;
   expandRelations?: boolean;
   includeSourceMetadata?: boolean;
+  relationSpaceIds?: string[];
 }
 
 export interface SearchScoreExplanation {
@@ -344,6 +345,7 @@ export interface MemoryTraversalOptions {
   query?: string;
   limit?: number;
   cursor?: string;
+  readableSpaceIds?: string[];
 }
 
 export interface MemoryTraversalPathStep {

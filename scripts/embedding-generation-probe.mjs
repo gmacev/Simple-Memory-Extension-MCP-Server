@@ -130,6 +130,20 @@ function createV6Fixture(databasePath) {
   );
   insertRevision.run('archived-r1', 'archived-memory', 1, null, timestamp, 'hash-3');
   insertRevision.run('deleted-space-r1', 'deleted-space-memory', 1, null, timestamp, 'hash-4');
+  database
+    .prepare(
+      `INSERT INTO memory_links(
+         id, space_id, from_memory_id, to_memory_id, relation, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'legacy-link',
+      'active-space',
+      'active-memory',
+      'archived-memory',
+      'related-to',
+      timestamp,
+    );
   const insertJob = database.prepare(
     `INSERT INTO index_jobs(id, revision_id, status, attempts, created_at, updated_at)
      VALUES (?, ?, 'complete', 1, ?, ?)`,
@@ -153,10 +167,15 @@ function run() {
   const logger = new Logger('error');
   let store = new MemoryStore(config, logger);
   const migration = store.migrationStatus();
-  assert(migration.fromVersion === 6 && migration.toVersion === 8, 'v6 should migrate through v8');
+  assert(migration.fromVersion === 6 && migration.toVersion === 9, 'v6 should migrate through v9');
   assert(
     migration.backupPath && existsSync(migration.backupPath),
     'migration should create a backup',
+  );
+  assert(
+    JSON.stringify(store.linkSpaceIds('legacy-link')) ===
+      JSON.stringify({ fromSpaceId: 'active-space', toSpaceId: 'active-space' }),
+    'cross-space migration should backfill legacy link endpoint spaces',
   );
 
   const prepared = store.prepareEmbeddingGeneration(profile);

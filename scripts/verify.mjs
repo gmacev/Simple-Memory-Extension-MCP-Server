@@ -11,6 +11,7 @@ const checks = [
   [process.execPath, [npmCli, 'run', 'lint']],
   [process.execPath, ['scripts/protocol-probe.mjs']],
   [process.execPath, ['scripts/structured-output-probe.mjs']],
+  [process.execPath, ['scripts/cross-space-links-probe.mjs']],
   [process.execPath, ['scripts/lexical-recall-probe.mjs']],
   [process.execPath, ['scripts/vector-metadata-probe.mjs']],
   [process.execPath, ['scripts/queue-probe.mjs']],

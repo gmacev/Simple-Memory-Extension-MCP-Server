@@ -131,7 +131,7 @@ function legacySearchEnvelope(query, compact, explained) {
 
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.9.5' },
+    { name: 'simple-memory-live-probe', version: '3.10.0' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({
@@ -632,11 +632,20 @@ async function run() {
     title: 'Unrelated isolated memory',
     content: 'This belongs to a different memory space.',
   });
-  await expectToolError(client, 'memory_link', {
+  const crossSpaceLink = await call(client, 'memory_link', {
     fromMemoryId: lease.id,
     toMemoryId: isolated.id,
-    relation: 'must_not_cross_spaces',
+    relation: 'cross_space_reference',
   });
+  const crossSpaceTraversal = await call(client, 'memory_traverse', {
+    memoryId: lease.id,
+    maxDepth: 1,
+  });
+  assert(
+    crossSpaceTraversal.items.some((entry) => entry.memory.id === isolated.id),
+    'cross-space graph traversal',
+  );
+  await call(client, 'memory_unlink', { linkId: crossSpaceLink.id });
 
   const link = await call(client, 'memory_link', {
     fromMemoryId: lease.id,

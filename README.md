@@ -229,9 +229,9 @@ Contributors can run the complete model-independent verification suite with `npm
 | `memory_archive` | Reversibly remove a memory from normal recall while preserving it. |
 | `memory_restore` | Return an archived memory to normal recall. |
 | `memory_delete` | Permanently erase a memory and all related data. |
-| `memory_link` | Idempotently create a relationship between memories. |
-| `memory_unlink` | Remove a relationship. |
-| `memory_traverse` | Explore connected memories with paths, filters, ranking, and pagination. |
+| `memory_link` | Idempotently create a relationship, including across writable spaces. |
+| `memory_unlink` | Remove a relationship when both endpoint spaces are writable. |
+| `memory_traverse` | Explore connected memories across readable spaces with paths, filters, ranking, and pagination. |
 | `memory_feedback` | Record standardized content or query-specific retrieval feedback for a revision. |
 | `memory_feedback_list` | Read compact or detailed feedback history. |
 | `memory_status` | Inspect storage, indexing, and model health. |
@@ -290,6 +290,8 @@ SIMPLE_MEMORY_FIXED_ACCESS={"spaces":{"agent-a-private":"write","project-shared"
 ```
 
 Use `oauth` when a shared HTTP server serves separate users or agents. Your identity provider authenticates callers; Simple Memory enforces the access grants carried by their tokens.
+
+Relationships may cross spaces. Creating or removing one requires write access to both spaces, while traversal exposes only destinations the caller may read.
 
 ### Retrieval and models
 

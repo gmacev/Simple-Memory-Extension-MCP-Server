@@ -13,7 +13,9 @@
 // Judgments format (identical to collected output, grades filled in by a human):
 //   [{ "query": "...", "relevant": [{ "memoryId": "...", "grade": 0-3 }], ...retrievalOptions }]
 // Grades: 0 = nonrelevant, 1 = marginally relevant, 2 = relevant, 3 = highly relevant.
-// Entries without at least one positively graded memory are skipped, not scored.
+// Fully judged all-zero entries measure false positives for no-answer queries.
+// If the collected pool is empty, set noRelevantResults:true after review;
+// otherwise an empty pool is unjudged and skipped.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -87,6 +89,12 @@ function recallAtK(resultIds, relevantIds, k) {
   return relevant.size === 0 ? null : hits / relevant.size;
 }
 
+function returnedPrecisionAtK(resultGrades, k) {
+  const shown = resultGrades.slice(0, k);
+  if (shown.length === 0) return 0;
+  return shown.filter((grade) => grade >= 1).length / shown.length;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   process.env.SIMPLE_MEMORY_DATA_DIR = args.dataDir;
@@ -140,6 +148,7 @@ async function main() {
         const response = await engine.search({ query: entry.query, ...options });
         skeleton.push({
           query: entry.query,
+          ...(entry.noRelevantResults === true ? { noRelevantResults: true } : {}),
           ...Object.fromEntries(
             RETRIEVAL_OPTION_KEYS.filter((key) => entry[key] !== undefined).map((key) => [
               key,
@@ -189,12 +198,23 @@ async function main() {
 
     const perQuery = [];
     let skipped = 0;
+    let noAnswerQueries = 0;
+    let noAnswerFalsePositives = 0;
+    let positiveFalseAbstentions = 0;
     for (const entry of judgments) {
-      const positiveGrades = entry.relevant.filter((item) => item.grade >= 1);
-      if (positiveGrades.length === 0 || !entry.query) {
+      if (
+        !entry.query ||
+        !Array.isArray(entry.relevant) ||
+        (entry.relevant.length === 0 && entry.noRelevantResults !== true) ||
+        entry.relevant.some(
+          (item) => !Number.isInteger(item.grade) || item.grade < 0 || item.grade > 3,
+        )
+      ) {
         skipped += 1;
         continue;
       }
+      const positiveGrades = entry.relevant.filter((item) => item.grade >= 1);
+      const noAnswer = positiveGrades.length === 0;
       const options = retrievalOptions(entry, args.mode, Math.max(args.topK, 10));
       const response = await engine.search({ query: entry.query, ...options });
       const gradeById = new Map(entry.relevant.map((item) => [item.memoryId, item.grade]));
@@ -203,23 +223,39 @@ async function main() {
       const idealGrades = [...gradeById.values()];
       const record = {
         query: entry.query,
+        noAnswer,
         degraded: response.degraded,
         timingMs: response.timingMs,
         stageTimings: response.stageTimings ?? {},
-        ndcgAt5: ndcgAtK(resultGrades, idealGrades, 5),
-        ndcgAt10: ndcgAtK(resultGrades, idealGrades, 10),
-        mrrAt10: mrrAtK(resultGrades, 10),
-        recallAt10: recallAtK(
-          resultIds,
-          positiveGrades.map((item) => item.memoryId),
-          10,
+        returnedResults: resultIds.length,
+        excerptCharacters: response.results.reduce(
+          (total, result) => total + result.excerpt.length,
+          0,
         ),
+        ndcgAt5: noAnswer ? null : ndcgAtK(resultGrades, idealGrades, 5),
+        ndcgAt10: noAnswer ? null : ndcgAtK(resultGrades, idealGrades, 10),
+        mrrAt10: noAnswer ? null : mrrAtK(resultGrades, 10),
+        recallAt10: noAnswer
+          ? null
+          : recallAtK(
+              resultIds,
+              positiveGrades.map((item) => item.memoryId),
+              10,
+            ),
+        returnedPrecisionAt5: noAnswer ? null : returnedPrecisionAtK(resultGrades, 5),
       };
       perQuery.push(record);
+      if (noAnswer) {
+        noAnswerQueries += 1;
+        if (resultIds.length > 0) noAnswerFalsePositives += 1;
+      } else if (resultIds.length === 0) {
+        positiveFalseAbstentions += 1;
+      }
       const format = (value) => (value === null ? 'SKIP' : value.toFixed(3));
       process.stdout.write(
         `${record.query} -> nDCG@5=${format(record.ndcgAt5)} nDCG@10=${format(record.ndcgAt10)} ` +
-          `MRR@10=${record.mrrAt10.toFixed(3)} R@10=${format(record.recallAt10)} ${record.timingMs}ms` +
+          `MRR@10=${format(record.mrrAt10)} R@10=${format(record.recallAt10)} ` +
+          `Pshown@5=${format(record.returnedPrecisionAt5)} results=${record.returnedResults} ${record.timingMs}ms` +
           `${record.degraded ? ' DEGRADED' : ''}\n`,
       );
     }
@@ -232,8 +268,9 @@ async function main() {
       return;
     }
 
-    const mean = (key) =>
-      perQuery.reduce((sum, row) => sum + (row[key] === null ? 0 : row[key]), 0) / perQuery.length;
+    const positiveQueries = perQuery.filter((row) => !row.noAnswer);
+    const mean = (rows, key) =>
+      rows.length > 0 ? rows.reduce((sum, row) => sum + row[key], 0) / rows.length : null;
     const stageKeys = ['embedMs', 'exactMs', 'lexicalMs', 'semanticMs', 'rerankMs'];
     const stageMeans = {};
     for (const key of stageKeys) {
@@ -250,11 +287,20 @@ async function main() {
       identity,
       queriesScored: perQuery.length,
       queriesSkipped: skipped,
-      ndcgAt5: mean('ndcgAt5'),
-      ndcgAt10: mean('ndcgAt10'),
-      mrrAt10: mean('mrrAt10'),
-      recallAt10: mean('recallAt10'),
-      meanTimingMs: mean('timingMs'),
+      positiveQueries: positiveQueries.length,
+      noAnswerQueries,
+      noAnswerFalsePositiveRate:
+        noAnswerQueries > 0 ? noAnswerFalsePositives / noAnswerQueries : null,
+      positiveFalseAbstentionRate:
+        positiveQueries.length > 0 ? positiveFalseAbstentions / positiveQueries.length : null,
+      ndcgAt5: mean(positiveQueries, 'ndcgAt5'),
+      ndcgAt10: mean(positiveQueries, 'ndcgAt10'),
+      mrrAt10: mean(positiveQueries, 'mrrAt10'),
+      recallAt10: mean(positiveQueries, 'recallAt10'),
+      returnedPrecisionAt5: mean(positiveQueries, 'returnedPrecisionAt5'),
+      meanReturnedResults: mean(perQuery, 'returnedResults'),
+      meanExcerptCharacters: mean(perQuery, 'excerptCharacters'),
+      meanTimingMs: mean(perQuery, 'timingMs'),
       meanStageTimingsMs: stageMeans,
       perQuery,
     };

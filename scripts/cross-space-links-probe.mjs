@@ -33,7 +33,7 @@ function parsedResult(response) {
 
 async function withClient(grants, callback) {
   const client = new Client(
-    { name: 'simple-memory-cross-space-links-probe', version: '3.10.0' },
+    { name: 'simple-memory-cross-space-links-probe', version: '3.10.1' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({

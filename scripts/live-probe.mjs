@@ -131,7 +131,7 @@ function legacySearchEnvelope(query, compact, explained) {
 
 async function connect() {
   const client = new Client(
-    { name: 'simple-memory-live-probe', version: '3.10.0' },
+    { name: 'simple-memory-live-probe', version: '3.10.1' },
     { versionNegotiation: { mode: 'auto' } },
   );
   const transport = new StdioClientTransport({

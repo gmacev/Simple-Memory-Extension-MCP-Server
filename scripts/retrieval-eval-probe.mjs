@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Exercises scripts/retrieval-eval.mjs end-to-end on a deterministic corpus:
-// collect -> human-style labeling -> eval scoring, including skip semantics.
+// collect -> human-style labeling -> eval scoring, including no-answer queries.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -88,7 +88,12 @@ async function main() {
       JSON.stringify([
         { query: 'rollback a bad deployment', spaceIds: ['eval-probe'] },
         { query: 'incident follow-up actions', spaceIds: ['eval-probe'] },
-        { query: 'unanswerable zebra quantum query' },
+        {
+          query: 'unanswerable zebra quantum query',
+          spaceIds: ['eval-probe'],
+          noRelevantResults: true,
+        },
+        { query: 'quantum deployment', spaceIds: ['eval-probe'] },
       ]),
     );
 
@@ -108,7 +113,7 @@ async function main() {
     );
     const envelope = JSON.parse(collected.stdout);
     assert(envelope.corpus === 4, `collect should see the seeded corpus, got ${envelope.corpus}`);
-    assert(envelope.entries.length === 3, 'collect should emit one entry per query');
+    assert(envelope.entries.length === 4, 'collect should emit one entry per query');
 
     // Human labeling pass (programmatic here): grade topically correct memories.
     // The envelope itself is fed to evaluation verbatim after filling grades in place —
@@ -129,7 +134,7 @@ async function main() {
         `expected a relevant candidate in pool for "${entry.query}"`,
       );
     }
-    // The third entry stays all-zero -> must be skipped by scoring, not counted as perfect.
+    // The last two entries stay all-zero: one has no lexical hit, one has an unrelated hit.
 
     const judgmentsPath = path.join(dataDir, 'judgments.json');
     writeFileSync(
@@ -149,11 +154,19 @@ async function main() {
       'eval identity must preserve collection-envelope corpus',
     );
     assert(
-      summary.queriesScored === 2,
-      `two entries should be scored, got ${summary.queriesScored}`,
+      summary.queriesScored === 4,
+      `all four judged entries should be scored, got ${summary.queriesScored}`,
     );
-    assert(summary.queriesSkipped === 1, 'all-zero judgment entry must be skipped');
+    assert(summary.queriesSkipped === 0, 'fully judged entries must not be skipped');
+    assert(summary.positiveQueries === 2, 'two entries should have positive judgments');
+    assert(summary.noAnswerQueries === 2, 'all-zero entries should be no-answer queries');
+    assert(
+      summary.noAnswerFalsePositiveRate === 0.5,
+      'no-answer queries with and without results should both be counted',
+    );
     assert(summary.recallAt10 === 1, 'seeded relevant docs must be recalled');
+    assert(summary.positiveFalseAbstentionRate === 0, 'positive queries must not be hidden');
+    assert(summary.returnedPrecisionAt5 > 0, 'positive-query precision should be reported');
     assert(
       summary.ndcgAt5 > 0.9,
       `nDCG@5 should be near-perfect on this corpus, got ${summary.ndcgAt5}`,
@@ -169,6 +182,7 @@ async function main() {
         ok: true,
         queriesScored: summary.queriesScored,
         queriesSkipped: summary.queriesSkipped,
+        noAnswerFalsePositiveRate: summary.noAnswerFalsePositiveRate,
         recallAt10: summary.recallAt10,
         ndcgAt10: summary.ndcgAt10,
       })}\n`,

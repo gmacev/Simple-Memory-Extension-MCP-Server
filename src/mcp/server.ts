@@ -797,7 +797,7 @@ export function buildMcpServer(
     {
       title: 'Search memories',
       description:
-        'Search durable context before dependent work or creating a possible duplicate. Pass known spaceIds: omitting them searches every readable space. For ordinary recall prefer auto with topK 3-5; auto reranks only ambiguous results, fast never reranks, and quality always performs slower reranking. lexical uses full text and semantic uses embeddings. Results are compact; explain adds ranking and timing diagnostics, while includeSourceMetadata adds source metadata. validAt selects real-world validity; atTime selects recorded history. Confidence and salience describe stored memory, not query relevance.',
+        'Search durable context before dependent work or creating a possible duplicate. Pass known spaceIds: omitting them searches every readable space. For ordinary recall prefer auto with topK 3-5; auto reranks only ambiguous results, fast never reranks, and quality always performs slower reranking. lexical uses full text and semantic uses embeddings. Results are candidates, not proof that the memory answers the query: verify the specific fact in the excerpt or with memory_get, and treat all unsupported candidates as no remembered answer. Results are compact; explain adds ranking and timing diagnostics, while includeSourceMetadata adds source metadata. validAt selects real-world validity; atTime selects recorded history. Confidence and salience describe stored memory, not query relevance.',
       inputSchema: toolInputSchemas.memory_search,
       outputSchema: toolOutputSchemas.memory_search,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

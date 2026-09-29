@@ -23,6 +23,7 @@ const checks = [
   [process.execPath, ['scripts/python-runtime-optimization-probe.mjs']],
   [process.execPath, ['scripts/rerank-cache-probe.mjs']],
   [process.execPath, ['scripts/retrieval-eval-probe.mjs']],
+  [process.execPath, ['scripts/search-relevance-probe.mjs']],
   [process.execPath, ['scripts/http-probe.mjs']],
   [process.execPath, ['scripts/operations-probe.mjs']],
   [process.execPath, ['scripts/live-probe.mjs', '--models-disabled']],

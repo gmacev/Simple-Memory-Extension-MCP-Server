@@ -37,7 +37,7 @@ const MIN_RERANK_CANDIDATES = 3;
 const RERANK_CANDIDATE_MULTIPLIER = 2;
 const AUTO_CLEAR_LEAD_RATIO = 1.1;
 const DECISIVE_RERANKER_SCORE = 0.5;
-const DECISIVE_RUNNER_UP_RATIO = 0.02;
+const DECISIVE_RUNNER_UP_RATIO = 0.1;
 
 function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
   const lines = candidate.record.revision.searchableText.split('\n');
@@ -154,11 +154,16 @@ function rerankDocument(candidate: FusedCandidate & { record: MemorySearchRecord
   if (revision.salience !== null) context.push(`Salience: ${revision.salience}`);
   if (revision.validFrom) context.push(`Valid from: ${revision.validFrom}`);
   if (revision.validTo) context.push(`Valid to: ${revision.validTo}`);
-  const sources = revision.sources
-    .map((source) => [source.label, source.type, source.uri].filter(Boolean).join(' | '))
-    .filter(Boolean);
-  if (sources.length > 0) context.push(`Sources: ${sources.join('; ')}`);
   context.push('Matched evidence:', ...candidate.rerankSegments.slice(0, RERANK_EVIDENCE_SEGMENTS));
+  const matchedSourceIndex = /^sources\/(\d+)\//u.exec(candidate.path)?.[1];
+  if (matchedSourceIndex !== undefined) {
+    const source = revision.sources[Number(matchedSourceIndex)];
+    if (source) {
+      context.push(
+        `Matched source: ${[source.label, source.type, source.uri].filter(Boolean).join(' | ')}`,
+      );
+    }
+  }
   return context.join('\n').slice(0, RERANK_DOCUMENT_LIMIT);
 }
 
@@ -188,7 +193,7 @@ function rerankCandidateLimit(topK: number, configuredLimit: number): number {
   );
 }
 
-function pruneDecisiveRerankWinner(
+function pruneWeakRerankAlternatives(
   ordered: Array<FusedCandidate & { record: MemorySearchRecord }>,
 ): Array<FusedCandidate & { record: MemorySearchRecord }> {
   const winner = ordered[0];
@@ -196,13 +201,21 @@ function pruneDecisiveRerankWinner(
   if (!winner || winnerScore === undefined || winnerScore < DECISIVE_RERANKER_SCORE) {
     return ordered;
   }
-  const strongestAlternative = ordered.reduce((highest, candidate, index) => {
-    if (index === 0 || candidate.score.rerankerScore === undefined) return highest;
-    return Math.max(highest, candidate.score.rerankerScore);
-  }, 0);
   const relevanceFloor = winnerScore * DECISIVE_RUNNER_UP_RATIO;
-  if (strongestAlternative >= relevanceFloor) return ordered;
-  return ordered.filter((candidate, index) => index === 0 || isStrongExactMatch(candidate));
+  const hasWeakRerankedAlternative = ordered.some(
+    (candidate, index) =>
+      index > 0 &&
+      candidate.score.rerankerScore !== undefined &&
+      candidate.score.rerankerScore < relevanceFloor,
+  );
+  if (!hasWeakRerankedAlternative) return ordered;
+  return ordered.filter(
+    (candidate, index) =>
+      index === 0 ||
+      isStrongExactMatch(candidate) ||
+      (candidate.score.rerankerScore !== undefined &&
+        candidate.score.rerankerScore >= relevanceFloor),
+  );
 }
 
 export class SearchEngine {
@@ -231,6 +244,49 @@ export class SearchEngine {
     let degraded = false;
     let degradationReason: string | undefined;
     const stages: SearchStageTimings = {};
+    const exactStarted = performance.now();
+    addRanking(
+      fused,
+      this.store.exactCandidates(options.query, filters, Math.min(topK * 2, 50)),
+      'exact',
+    );
+    stages.exactMs = roundStageMs(performance.now() - exactStarted);
+
+    // An exact key, ID, or title identifies its result without embedding or
+    // reranking. Keep quality mode and relation expansion on their explicit paths.
+    if (fused.size > 0 && mode !== 'quality' && !options.expandRelations) {
+      const records = this.store.getMemoriesByRevisionIds(
+        [...fused.values()].map((candidate) => candidate.revisionId),
+        options.atTime,
+        options.includeSourceMetadata ?? false,
+      );
+      const exactResults: SearchResult[] = [...fused.values()]
+        .flatMap((candidate) => {
+          const record = records.get(candidate.revisionId);
+          if (!record) return [];
+          const resolved = { ...candidate, record };
+          return [
+            {
+              memory: record,
+              excerpt: contextualExcerpt(resolved),
+              segmentPath: candidate.path,
+              score: candidate.score,
+            },
+          ];
+        })
+        .slice(0, topK);
+      if (exactResults.length > 0) {
+        return {
+          query: options.query,
+          mode,
+          degraded: false,
+          results: exactResults,
+          timingMs: roundStageMs(performance.now() - started),
+          stageTimings: stages,
+        };
+      }
+    }
+
     const semanticCandidates =
       mode === 'lexical'
         ? null
@@ -262,14 +318,6 @@ export class SearchEngine {
             stages.semanticMs = roundStageMs(performance.now() - semanticStarted);
             return candidates;
           })();
-
-    const exactStarted = performance.now();
-    addRanking(
-      fused,
-      this.store.exactCandidates(options.query, filters, Math.min(topK * 2, 50)),
-      'exact',
-    );
-    stages.exactMs = roundStageMs(performance.now() - exactStarted);
 
     if (mode !== 'semantic') {
       const lexicalStarted = performance.now();
@@ -372,7 +420,7 @@ export class SearchEngine {
           candidate.score.fusedScore += score * 0.05;
         });
         ordered = ordered.sort((left, right) => right.score.fusedScore - left.score.fusedScore);
-        ordered = pruneDecisiveRerankWinner(ordered);
+        ordered = pruneWeakRerankAlternatives(ordered);
       } catch (error) {
         degraded = true;
         degradationReason = degradationReason

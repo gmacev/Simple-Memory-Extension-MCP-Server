@@ -236,7 +236,7 @@ Contributors can run the complete model-independent verification suite with `npm
 | `memory_feedback_list` | Read compact or detailed feedback history. |
 | `memory_status` | Inspect storage, indexing, and model health. |
 
-List and search results are compact by default; use `memory_get`, `includeContent`, `includeDetails`, `includeSourceMetadata`, or `explain` when fuller context or diagnostics are needed. For ordinary search, pass known spaces and use `auto` with a small result limit; omitting spaces searches every accessible space, while `quality` deliberately spends more time reranking.
+List and search results are compact by default; use `memory_get`, `includeContent`, `includeDetails`, `includeSourceMetadata`, or `explain` when fuller context or diagnostics are needed. For ordinary search, pass known spaces and use `auto` with a small result limit; omitting spaces searches every accessible space, while `quality` deliberately spends more time reranking. An exact memory ID, logical key, or title returns its exact matches directly in ordinary modes. Ambiguous searches still rerank; when a winner is decisive, individually weak reranked alternatives are omitted. Searches may still return weak matches when relevance is uncertain.
 
 Agents can also read complete memories and revision histories through MCP resources.
 

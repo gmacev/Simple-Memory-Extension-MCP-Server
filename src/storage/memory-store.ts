@@ -2218,16 +2218,20 @@ export class MemoryStore {
     );
     if (rows.length === 0) return [];
     const segmentTexts = new Map<string, { text: string; path: string }>();
-    for (const row of rows) {
-      const segmentId = String(row.segment_id);
-      const segment = this.getRow(
-        'SELECT text AS text, path AS path FROM memory_segments WHERE id = ?',
-        segmentId,
+    const segmentIds = [...new Set(rows.map((row) => String(row.segment_id)))];
+    for (let offset = 0; offset < segmentIds.length; offset += 500) {
+      const batch = segmentIds.slice(offset, offset + 500);
+      const segments = this.allRows(
+        `SELECT id, text, path FROM memory_segments
+         WHERE id IN (${batch.map(() => '?').join(',')})`,
+        ...batch,
       );
-      segmentTexts.set(segmentId, {
-        text: String(segment?.text ?? ''),
-        path: String(segment?.path ?? ''),
-      });
+      for (const segment of segments) {
+        segmentTexts.set(String(segment.id), {
+          text: String(segment.text ?? ''),
+          path: String(segment.path ?? ''),
+        });
+      }
     }
     return rows.map((row) => {
       const segmentId = String(row.segment_id);

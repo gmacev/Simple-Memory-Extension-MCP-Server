@@ -193,6 +193,15 @@ async function run() {
       'weak target missing from scoped search results',
     );
 
+    if (NOISE_COUNT >= 601) {
+      const largePool = store.lexicalCandidates('architecture', {}, 601);
+      assert(largePool.length === 601, 'large lexical pools must retain their configured limit');
+      assert(
+        largePool.every((candidate) => candidate.text.length > 0 && candidate.path.length > 0),
+        'bulk hydration must cover pools spanning multiple batches',
+      );
+    }
+
     const globalSearch = await searchEngine.search({
       query: 'architecture',
       topK: 5,

@@ -37,7 +37,7 @@ export type EmbeddingModelProfile = Pick<
 >;
 
 const QUERY_EMBEDDING_CACHE_LIMIT = 128;
-const RERANK_CACHE_LIMIT = 128;
+const RERANK_CACHE_LIMIT = 4_096;
 
 interface RerankProfile {
   rerankerModel: string;
@@ -51,17 +51,14 @@ function pushFramedComponent(hash: Hash, value: string): void {
   hash.update(bytes);
 }
 
-function rerankCacheKey(query: string, documents: string[], profile: RerankProfile): string {
+function rerankCacheKey(query: string, document: string, profile: RerankProfile): string {
   const hash = createHash('sha256');
-  pushFramedComponent(hash, 'v2');
+  pushFramedComponent(hash, 'pair-v1');
   pushFramedComponent(hash, profile.rerankerModel);
   pushFramedComponent(hash, profile.rerankerRevision);
   pushFramedComponent(hash, profile.instructionHash);
   pushFramedComponent(hash, query);
-  pushFramedComponent(hash, String(documents.length));
-  for (const document of documents) {
-    pushFramedComponent(hash, document);
-  }
+  pushFramedComponent(hash, document);
   return hash.digest('hex');
 }
 
@@ -71,7 +68,7 @@ export class ModelClient {
   private embeddingProfilePromise: Promise<EmbeddingModelProfile> | null = null;
   private rerankProfilePromise: Promise<RerankProfile> | null = null;
   private readonly queryEmbeddingCache = new Map<string, Promise<EmbeddingVector>>();
-  private readonly rerankCache = new Map<string, Promise<number[]>>();
+  private readonly rerankCache = new Map<string, Promise<number>>();
 
   public constructor(config: AppConfig, logger: Logger, forwardWorkerStderr = false) {
     this.transport = new ModelWorkerTransport(config, logger, forwardWorkerStderr);
@@ -146,6 +143,7 @@ export class ModelClient {
   }
 
   public rerank(query: string, documents: string[]): Promise<number[]> {
+    if (documents.length === 0) return Promise.resolve([]);
     return this.withRerankProfile().then(
       (profile) => this.cachedRerank(query, documents, profile),
       () => this.scheduler.rerank(query, documents),
@@ -171,24 +169,48 @@ export class ModelClient {
     documents: string[],
     profile: RerankProfile,
   ): Promise<number[]> {
-    const key = rerankCacheKey(query, documents, profile);
-    const cached = this.rerankCache.get(key);
-    if (cached) {
-      this.rerankCache.delete(key);
-      this.rerankCache.set(key, cached);
-      return cached;
-    }
-    const pending = this.scheduler.rerank(query, documents);
-    this.rerankCache.set(key, pending);
-    void pending.catch(() => {
-      if (this.rerankCache.get(key) === pending) this.rerankCache.delete(key);
+    const keys = documents.map((document) => rerankCacheKey(query, document, profile));
+    const scores = new Map<string, Promise<number>>();
+    const missing = new Map<string, string>();
+    documents.forEach((document, index) => {
+      const key = keys[index];
+      if (key === undefined || scores.has(key) || missing.has(key)) return;
+      const cached = this.rerankCache.get(key);
+      if (cached) {
+        this.rerankCache.delete(key);
+        this.rerankCache.set(key, cached);
+        scores.set(key, cached);
+      } else {
+        missing.set(key, document);
+      }
     });
+    if (missing.size > 0) {
+      const pending = this.scheduler.rerank(query, [...missing.values()]);
+      [...missing.keys()].forEach((key, index) => {
+        const score = pending.then((values) => {
+          const value = values[index];
+          if (value === undefined) throw new Error('Reranking score is missing');
+          return value;
+        });
+        scores.set(key, score);
+        this.rerankCache.set(key, score);
+        void score.catch(() => {
+          if (this.rerankCache.get(key) === score) this.rerankCache.delete(key);
+        });
+      });
+    }
     while (this.rerankCache.size > RERANK_CACHE_LIMIT) {
       const oldest = this.rerankCache.keys().next();
       if (oldest.done) break;
       this.rerankCache.delete(oldest.value);
     }
-    return pending;
+    return Promise.all(
+      keys.map((key) => {
+        const score = scores.get(key);
+        if (!score) throw new Error('Reranking cache mapping is missing');
+        return score;
+      }),
+    );
   }
 
   public schedulerStatus(): InferenceSchedulerSnapshot {

@@ -1,142 +1,149 @@
 #!/usr/bin/env node
-// Deterministic, model-independent rerank-cache probe.
-// Mocks worker health and scheduler reranking and exercises ModelClient.rerank()
-// directly: cache hits, identity-keyed misses, framing-ambiguity resistance,
-// failure eviction/propagation, profile-failure bypass, and LRU eviction.
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+// Model-independent regression coverage for exact query/passage score reuse.
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { loadConfig } from '../dist/config.js';
 import { Logger } from '../dist/logger.js';
 import { ModelClient } from '../dist/models/model-client.js';
 
-const dataDir = mkdtempSync(path.join(tmpdir(), 'simple-memory-rerank-cache-'));
-process.env.SIMPLE_MEMORY_DATA_DIR = dataDir;
-process.env.SIMPLE_MEMORY_MODELS = 'disabled';
-process.env.SIMPLE_MEMORY_LOG_LEVEL = 'error';
-
-function assert(condition, message) {
-  if (!condition) throw new Error(`Rerank cache probe assertion failed: ${message}`);
+function score(query, document) {
+  return (
+    createHash('sha256')
+      .update(JSON.stringify([query, document]))
+      .digest()
+      .readUInt32LE() /
+    2 ** 32
+  );
 }
 
-async function main() {
-  const config = loadConfig();
-  const models = new ModelClient(config, new Logger('error'));
-
-  let healthCalls = 0;
-  let failHealthNext = false;
-  const baseProfile = {
+function fixture() {
+  const models = new ModelClient({ ...loadConfig(), modelsEnabled: false }, new Logger('error'));
+  const calls = [];
+  const profile = {
     reranker_model: 'mock-reranker',
     reranker_revision: 'rev-1',
-    rerank_instruction_hash: 'ih-1',
+    rerank_instruction_hash: 'instruction-1',
   };
-  const baseHealth = async () => {
-    healthCalls += 1;
-    if (failHealthNext) {
-      failHealthNext = false;
-      throw new Error('synthetic health failure');
-    }
-    return { ...baseProfile };
-  };
-  models.health = baseHealth;
-
-  let schedulerCalls = 0;
-  let failNextRerank = false;
+  models.health = async () => ({ ...profile });
   models.scheduler.rerank = async (query, documents) => {
-    schedulerCalls += 1;
-    if (failNextRerank) {
-      failNextRerank = false;
-      throw new Error('synthetic rerank failure');
-    }
-    return documents.map(
-      (document, index) => (((query.length * 31 + document.length * 17 + index) % 97) + 1) / 98,
-    );
+    calls.push({ query, documents });
+    return documents.map((document) => score(query, document));
   };
-  models.stop = async () => {};
+  return { models, calls, profile };
+}
 
+async function reuseAndIdentity() {
+  const { models, calls, profile } = fixture();
   try {
-    // Cache hit: identical request resolves without touching the scheduler.
-    const first = await models.rerank('query one', ['doc alpha', 'doc beta']);
-    assert(
-      schedulerCalls === 1 && healthCalls === 1,
-      'first call should invoke scheduler + health once',
+    assert.deepEqual(await models.rerank('empty', []), []);
+    assert.equal(calls.length, 0);
+    const first = await models.rerank('query', ['alpha', 'beta', 'alpha']);
+    assert.deepEqual(calls[0].documents, ['alpha', 'beta'], 'duplicate passages must score once');
+    assert.deepEqual(first, [
+      score('query', 'alpha'),
+      score('query', 'beta'),
+      score('query', 'alpha'),
+    ]);
+    first[0] = -1;
+    assert.deepEqual(await models.rerank('query', ['beta', 'alpha']), [
+      score('query', 'beta'),
+      score('query', 'alpha'),
+    ]);
+    assert.equal(
+      calls.length,
+      1,
+      'reordering/subsets and caller mutation must preserve cached scores',
     );
-    const cached = await models.rerank('query one', ['doc alpha', 'doc beta']);
-    assert(schedulerCalls === 1, 'identical request must be served from cache');
-    assert(cached === first, 'cached entry must resolve to the same promise instance');
-
-    // Distinct query with same docs misses; distinct docs with same query misses.
-    await models.rerank('query two', ['doc alpha', 'doc beta']);
-    assert(schedulerCalls === 2, 'different query must miss');
-    await models.rerank('query one', ['doc gamma']);
-    assert(schedulerCalls === 3, 'different documents must miss');
-
-    // Reranker identity is part of the key; returning to a prior identity hits its own entry.
-    models.rerankProfilePromise = null;
-    models.health = async () => ({ ...baseProfile, reranker_revision: 'rev-2' });
-    await models.rerank('query one', ['doc alpha', 'doc beta']);
-    assert(schedulerCalls === 4, 'reranker revision change must miss');
-    models.rerankProfilePromise = null;
-    models.health = baseHealth;
-    await models.rerank('query one', ['doc alpha', 'doc beta']);
-    assert(schedulerCalls === 4, 'prior-profile entry must still be served from cache');
-
-    // Framing resistance: NUL-bearing components must not alias across tuples.
-    const tupleA = ['a', ['b\u0000c']];
-    const tupleB = ['a\u0000b', ['c']];
-    await models.rerank(...tupleA);
-    const afterTupleA = schedulerCalls;
-    await models.rerank(...tupleB);
-    assert(schedulerCalls === afterTupleA + 1, 'NUL-framed tuples must not collide');
-    await models.rerank(...tupleA);
-    assert(schedulerCalls === afterTupleA + 1, 'tuple A must still hit its own entry');
-
-    // Profile-resolution failure bypasses caching but still serves the request.
-    models.rerankProfilePromise = null;
-    failHealthNext = true;
-    const bypassed = await models.rerank('bypass query', ['doc x']);
-    assert(
-      schedulerCalls === afterTupleA + 2,
-      'profile failure must fall through to scheduler once',
-    );
-    assert(bypassed.length === 1, 'fallback rerank must return scores');
-    await models.rerank('bypass query', ['doc x']);
-    assert(schedulerCalls === afterTupleA + 3, 'fallback result must not have been cached');
-
-    // Failed cached rerank: evicted and propagated, no silent immediate retry.
-    failNextRerank = true;
-    await models.rerank('doomed query', ['doc y']).then(
-      () => {
-        throw new Error('expected rerank rejection');
-      },
-      (error) => assert(String(error).includes('synthetic'), 'failure must propagate'),
-    );
-    const afterFailure = schedulerCalls;
-    await models.rerank('doomed query', ['doc y']);
-    assert(schedulerCalls === afterFailure + 1, 'failed entry must be evicted for a later retry');
-    await models.rerank('doomed query', ['doc y']);
-    assert(schedulerCalls === afterFailure + 1, 'successful retry must be cached');
-
-    // LRU bound: oldest entries are evicted beyond the cap.
-    for (let index = 0; index < 140; index += 1) {
-      await models.rerank(`lru filler ${index}`, ['doc z']);
+    await models.rerank('query', ['alpha', 'gamma', 'beta']);
+    assert.deepEqual(calls[1].documents, ['gamma'], 'only the added passage should be scored');
+    await models.rerank('different query', ['alpha']);
+    assert.equal(calls.length, 3, 'different query must miss');
+    await models.rerank('query', ['Alpha']);
+    assert.equal(calls.length, 4, 'exact scoring text, including case, must be keyed');
+    for (const field of ['reranker_model', 'reranker_revision', 'rerank_instruction_hash']) {
+      const previous = profile[field];
+      profile[field] = `${previous}-changed`;
+      models.rerankProfilePromise = null;
+      const before = calls.length;
+      await models.rerank('query', ['alpha']);
+      assert.equal(calls.length, before + 1, `${field} change must miss`);
+      profile[field] = previous;
+      models.rerankProfilePromise = null;
+      await models.rerank('query', ['alpha']);
+      assert.equal(calls.length, before + 1, 'restored model identity may reuse its own scores');
     }
-    const beforeEvictionCheck = schedulerCalls;
-    await models.rerank('query one', ['doc alpha', 'doc beta']);
-    assert(
-      schedulerCalls === beforeEvictionCheck + 1,
-      'oldest entry must have been evicted by LRU bound',
-    );
-    await models.rerank('lru filler 139', ['doc z']);
-    assert(schedulerCalls === beforeEvictionCheck + 1, 'recent entry must remain cached');
-
-    process.stdout.write(
-      `${JSON.stringify({ ok: true, schedulerCalls, healthCalls, modelIndependent: true })}\n`,
-    );
+    await models.rerank('a', ['b\u0000c']);
+    const before = calls.length;
+    await models.rerank('a\u0000b', ['c']);
+    assert.equal(calls.length, before + 1, 'framed query/document tuples must not collide');
   } finally {
     await models.stop();
-    rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 }
 
-await main();
+async function pendingAndFailures() {
+  const { models } = fixture();
+  const calls = [];
+  const releases = [];
+  models.scheduler.rerank = (query, documents) => {
+    calls.push(documents);
+    return new Promise((resolve, reject) => releases.push({ query, documents, resolve, reject }));
+  };
+  try {
+    const first = models.rerank('query', ['a', 'b']);
+    const second = models.rerank('query', ['b', 'c']);
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, [['a', 'b'], ['c']], 'overlapping in-flight requests must share pairs');
+    for (const release of releases.splice(0)) {
+      release.resolve(release.documents.map((document) => score(release.query, document)));
+    }
+    assert.deepEqual(await first, [score('query', 'a'), score('query', 'b')]);
+    assert.deepEqual(await second, [score('query', 'b'), score('query', 'c')]);
+    const failed = models.rerank('query', ['a', 'd']);
+    const overlappingFailure = models.rerank('query', ['d']);
+    const settled = Promise.allSettled([failed, overlappingFailure]);
+    await new Promise(setImmediate);
+    assert.deepEqual(calls.at(-1), ['d']);
+    releases.shift().reject(new Error('synthetic failure'));
+    assert((await settled).every((result) => result.status === 'rejected'));
+    const retry = models.rerank('query', ['d', 'a']);
+    await new Promise(setImmediate);
+    assert.deepEqual(calls.at(-1), ['d'], 'failure must evict only failed pairs');
+    releases.shift().resolve([score('query', 'd')]);
+    assert.deepEqual(await retry, [score('query', 'd'), score('query', 'a')]);
+  } finally {
+    await models.stop();
+  }
+}
+
+async function bypassAndEviction() {
+  const { models, calls } = fixture();
+  try {
+    const health = models.health;
+    models.health = async () => {
+      throw new Error('synthetic health failure');
+    };
+    await models.rerank('bypass', ['a']);
+    models.health = health;
+    await models.rerank('bypass', ['a']);
+    assert.equal(calls.length, 2, 'unknown profile must bypass caching');
+    models.rerankCache.clear();
+    await models.rerank('lru', ['old', 'recent']);
+    await models.rerank('lru', ['recent']);
+    const filler = Array.from({ length: 4_095 }, (_, index) => `filler-${index}`);
+    const values = await models.rerank('lru', filler);
+    assert.equal(values.length, filler.length, 'eviction must not lose current caller mappings');
+    const before = calls.length;
+    await models.rerank('lru', ['recent']);
+    assert.equal(calls.length, before, 'recent pair must remain cached');
+    await models.rerank('lru', ['old']);
+    assert.equal(calls.length, before + 1, 'oldest pair must be evicted at the bounded capacity');
+  } finally {
+    await models.stop();
+  }
+}
+
+await reuseAndIdentity();
+await pendingAndFailures();
+await bypassAndEviction();
+process.stdout.write('Rerank pair cache probe passed.\n');

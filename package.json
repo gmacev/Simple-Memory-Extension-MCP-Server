@@ -1,6 +1,6 @@
 {
   "name": "simple-memory-extension-mcp-server",
-  "version": "3.10.2",
+  "version": "3.10.3",
   "description": "A local-first, generic persistent memory layer for MCP agents",
   "repository": {
     "type": "git",

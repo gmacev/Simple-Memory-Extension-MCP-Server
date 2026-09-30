@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import runpy
+from importlib.util import find_spec
+from pathlib import Path
+
 from simple_memory_models.tokenization import count_token_lengths
 
 
@@ -38,5 +42,10 @@ except RuntimeError as error:
     assert "invalid length batch" in str(error)
 else:
     raise AssertionError("Invalid tokenizer batch response should fail")
+
+if all(find_spec(name) is not None for name in ("torch", "sentence_transformers", "transformers")):
+    runpy.run_path(str(Path(__file__).with_name("prefix_reuse_probe.py")))
+else:
+    print("Prefix reuse tensor probe skipped: optional model dependencies are not installed.")
 
 print("Python runtime optimization probe passed.")

@@ -11,6 +11,7 @@ import torch
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from .prefix_reuse import PrefixReuseState, predict_with_prefix_reuse
 from .tokenization import count_token_lengths
 
 DEFAULT_EMBEDDING_MODEL = "codefuse-ai/F2LLM-v2-330M"
@@ -97,6 +98,7 @@ class ModelRuntime:
         self._embedding: SentenceTransformer | None = None
         self._reranker: CrossEncoder | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
+        self._rerank_prefix = PrefixReuseState()
         self._lock = threading.RLock()
 
     @property
@@ -223,6 +225,19 @@ class ModelRuntime:
         if not pairs:
             return []
         model = self._get_reranker()
+        if (
+            self.config.reranker_model == DEFAULT_RERANKER_MODEL
+            and self.config.reranker_revision == DEFAULT_RERANKER_REVISION
+        ):
+            reused = predict_with_prefix_reuse(
+                model,
+                pairs,
+                self.config.rerank_instruction,
+                self.config.rerank_batch_size,
+                self._rerank_prefix,
+            )
+            if reused is not None:
+                return reused
         scores = model.predict(
             pairs,
             batch_size=self.config.rerank_batch_size,

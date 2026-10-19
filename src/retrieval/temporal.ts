@@ -1,4 +1,5 @@
 import type { TimeWindow } from '../domain/types.js';
+import { localizedDates } from './localized-dates.js';
 
 const DAY = 86_400_000;
 const MONTHS = [
@@ -52,7 +53,25 @@ export function calendarDates(text: string): DatedWindow[] {
     const window = dayWindow(Number(match[3] ?? match[6]), month, Number(match[1] ?? match[5]));
     if (window) found.push({ ...window, offset: match.index, text: match[0] });
   }
-  return found.sort((a, b) => a.offset - b.offset);
+  for (const date of localizedDates(clean)) {
+    const window = dayWindow(date.year, date.month - 1, date.day);
+    if (window)
+      found.push({ ...window, offset: date.offset, text: text.slice(date.offset, date.endOffset) });
+  }
+  return found
+    .sort((a, b) => a.offset - b.offset || b.text.length - a.text.length)
+    .filter(
+      (date, index, all) =>
+        !all
+          .slice(0, index)
+          .some(
+            (previous) =>
+              previous.start === date.start &&
+              previous.end === date.end &&
+              previous.offset <= date.offset &&
+              previous.offset + previous.text.length >= date.offset + date.text.length,
+          ),
+    );
 }
 
 export function queryTimeWindows(query: string): TimeWindow[] {
@@ -115,6 +134,114 @@ export interface TemporalSegment {
 export interface SegmentTime extends TimeWindow {
   segmentId: string;
   basis: 'content' | 'observed';
+  passageStart: number;
+  passageEnd: number;
+}
+
+const sentences = new Intl.Segmenter('und', { granularity: 'sentence' });
+
+/** Offsets refer to the stored segment, never to rewritten or translated text. */
+export function datePassages(
+  text: string,
+  dates: DatedWindow[],
+): Array<{
+  start: number;
+  end: number;
+  dates: DatedWindow[];
+}> {
+  if (new Set(dates.map((date) => date.start)).size < 2)
+    return [{ start: 0, end: text.length, dates }];
+  const boundaries = new Set([0, text.length]);
+  for (const sentence of sentences.segment(text)) boundaries.add(sentence.index);
+  // ICU can keep a sentence-ending period and a following numeric date together.
+  for (const date of dates) {
+    if (/[.!?。！？]\s+$/u.test(text.slice(0, date.offset))) boundaries.add(date.offset);
+  }
+  for (const match of text.matchAll(/[;；\n]+/gu)) boundaries.add(match.index + match[0].length);
+  const points = [...boundaries]
+    .filter(
+      (point) =>
+        !dates.some((date) => point > date.offset && point < date.offset + date.text.length),
+    )
+    .sort((a, b) => a - b);
+  const passages: Array<{ start: number; end: number; dates: DatedWindow[] }> = [];
+  let current: (typeof passages)[number] | undefined;
+  let heading = false;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (start === undefined || end === undefined) continue;
+    const local = dates.filter((date) => date.offset >= start && date.offset < end);
+    if (local.length > 0) {
+      current = { start, end, dates: local };
+      passages.push(current);
+      const date = local[0];
+      heading =
+        local.length === 1 &&
+        date !== undefined &&
+        /^[\s#]*$/u.test(text.slice(start, date.offset)) &&
+        /^[\s:：]*$/u.test(text.slice(date.offset + date.text.length, end));
+    } else if (current) {
+      // A dated heading scopes its section. Ordinary prose only scopes its paragraph.
+      if (!heading && /\n\s*\n/u.test(text.slice(Math.max(current.start, current.end - 2), end)))
+        current = undefined;
+      else if (/^\s*#{1,6}\s/u.test(text.slice(start, end))) current = undefined;
+      else current.end = end;
+    }
+  }
+  const first = passages[0];
+  // Preserve shared introductions (environment, scope, caveats) for every date.
+  // They contain no date themselves and must not disappear when focusing later events.
+  const headings = [...text.matchAll(/^#{1,6}[ \t]+[^\n]+/gmu)].filter(
+    (heading) =>
+      !dates.some(
+        (date) => date.offset >= heading.index && date.offset < heading.index + heading[0].length,
+      ),
+  );
+  const context: typeof passages = [];
+  if (first && first.start > 0) {
+    const nextHeading = headings.find((heading) => heading.index >= first.start);
+    context.push({
+      start: 0,
+      end: first.start,
+      dates: dates.filter((date) => date.offset < (nextHeading?.index ?? text.length)),
+    });
+  }
+  for (const [index, heading] of headings.entries()) {
+    if (first && heading.index < first.start) continue;
+    const end = headings[index + 1]?.index ?? text.length;
+    context.push({
+      start: heading.index,
+      end: heading.index + heading[0].length,
+      dates: dates.filter((date) => date.offset >= heading.index && date.offset < end),
+    });
+  }
+  passages.push(...context);
+  return passages;
+}
+
+export function passageText(
+  segment: TemporalSegment,
+  spans: Array<{ start: number; end: number }>,
+): string {
+  const prefix = `${segment.path}:`;
+  const prefixIndex = segment.text.indexOf(prefix);
+  const prefixEnd = prefixIndex < 0 ? 0 : prefixIndex + prefix.length;
+  const bodyStart = prefixEnd + (/^[ \t]*/u.exec(segment.text.slice(prefixEnd))?.[0].length ?? 0);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of spans.sort((a, b) => a.start - b.start)) {
+    const previous = merged.at(-1);
+    if (previous && span.start <= previous.end) previous.end = Math.max(previous.end, span.end);
+    else merged.push({ ...span });
+  }
+  if (merged.some((span) => span.start === 0 && span.end === segment.text.length))
+    return segment.text;
+  return (
+    segment.text.slice(0, bodyStart) +
+    merged
+      .map((span) => segment.text.slice(Math.max(bodyStart, span.start), span.end))
+      .join('\n…\n')
+  );
 }
 
 function evidenceText(segment: TemporalSegment): string {
@@ -164,7 +291,27 @@ export function segmentTimes(
   const output: SegmentTime[] = [];
   for (const segment of segments) {
     if (segment.path !== '$' && !segment.path.startsWith('$/')) continue;
-    let dates: TimeWindow[] = calendarDates(evidenceText(segment));
+    const body = evidenceText(segment);
+    const explicitDates = calendarDates(body);
+    if (new Set(explicitDates.map((date) => date.start)).size > 1) {
+      const offset = segment.text.length - body.length;
+      const indexedDates = new Set(explicitDates.slice(0, 32));
+      for (const passage of datePassages(body, explicitDates)) {
+        for (const date of passage.dates) {
+          if (!indexedDates.has(date)) continue;
+          output.push({
+            segmentId: segment.id,
+            start: date.start,
+            end: date.end,
+            basis: 'content',
+            passageStart: offset + passage.start,
+            passageEnd: offset + passage.end,
+          });
+        }
+      }
+      continue;
+    }
+    let dates: TimeWindow[] = explicitDates;
     if (dates.length === 0) dates = relativeDates(evidenceText(segment), observedAt);
     let parent = segment.path.slice(0, segment.path.lastIndexOf('/'));
     while (dates.length === 0 && parent) {
@@ -173,11 +320,25 @@ export function segmentTimes(
     }
     if (dates.length > 0) {
       for (const { start, end } of dates.slice(0, 32))
-        output.push({ segmentId: segment.id, start, end, basis: 'content' });
+        output.push({
+          segmentId: segment.id,
+          start,
+          end,
+          basis: 'content',
+          passageStart: 0,
+          passageEnd: segment.text.length,
+        });
     } else if (observedAt) {
       const date = calendarDates(new Date(observedAt).toISOString())[0];
       if (date)
-        output.push({ segmentId: segment.id, start: date.start, end: date.end, basis: 'observed' });
+        output.push({
+          segmentId: segment.id,
+          start: date.start,
+          end: date.end,
+          basis: 'observed',
+          passageStart: 0,
+          passageEnd: segment.text.length,
+        });
     }
   }
   return output;

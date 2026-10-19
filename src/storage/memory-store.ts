@@ -46,13 +46,14 @@ import type {
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
-import { segmentTimes } from '../retrieval/temporal.js';
+import { passageText, segmentTimes } from '../retrieval/temporal.js';
 import { compileSchema } from '../validation.js';
 import { applyMigrations, type MigrationStatus } from './migrations/index.js';
 
 type Row = Record<string, unknown>;
 
 export interface RankedSegment {
+  originalText?: string;
   timeMatch?: TimeWindow & { basis: 'content' | 'observed' };
   segmentId: string;
   memoryId: string;
@@ -1896,10 +1897,17 @@ export class MemoryStore {
       revisionId,
     ).map((row) => ({ id: String(row.id), path: String(row.path), text: String(row.text) }));
     const insert = this.prepare(
-      'INSERT OR IGNORE INTO memory_segment_times(segment_id, start_at, end_at, basis) VALUES (?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO memory_segment_times(segment_id, start_at, end_at, basis, passage_start, passage_end) VALUES (?, ?, ?, ?, ?, ?)',
     );
     for (const anchor of segmentTimes(segments, optionalString(revision.observed_at))) {
-      insert.run(anchor.segmentId, anchor.start, anchor.end, anchor.basis);
+      insert.run(
+        anchor.segmentId,
+        anchor.start,
+        anchor.end,
+        anchor.basis,
+        anchor.passageStart,
+        anchor.passageEnd,
+      );
     }
     this.prepare('INSERT OR IGNORE INTO memory_temporal_revisions(revision_id) VALUES (?)').run(
       revisionId,
@@ -1933,7 +1941,7 @@ export class MemoryStore {
     if (terms.length === 0) return [];
     const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(' OR ');
     const overlaps = windows.map(() => '(t.start_at < ? AND t.end_at > ?)').join(' OR ');
-    return this.allRows(
+    const rankedRows = this.allRows(
       `WITH matching_times AS MATERIALIZED (
         SELECT segment_id, start_at, end_at, basis,
           ROW_NUMBER() OVER (PARTITION BY segment_id ORDER BY CASE basis WHEN 'content' THEN 0 ELSE 1 END, start_at) AS ordinal
@@ -1949,19 +1957,63 @@ export class MemoryStore {
       match,
       ...candidates.parameters,
       limit,
-    ).map((row) => ({
-      segmentId: String(row.segment_id),
-      memoryId: String(row.memory_id),
-      revisionId: String(row.revision_id),
-      path: String(row.path),
-      text: String(row.text),
-      rankValue: Number(row.rank_value),
-      timeMatch: {
-        start: String(row.start_at),
-        end: String(row.end_at),
-        basis: row.basis === 'content' ? 'content' : 'observed',
-      },
-    }));
+    );
+    // A dated-evidence channel must also work when full-text tokenization cannot
+    // match the query's script (or when the wording is a paraphrase).
+    if (rankedRows.length === 0) {
+      const datedRows = this.allRows(
+        `WITH matching_times AS MATERIALIZED (
+          SELECT segment_id, start_at, end_at, basis,
+            ROW_NUMBER() OVER (PARTITION BY segment_id ORDER BY CASE basis WHEN 'content' THEN 0 ELSE 1 END, start_at) AS ordinal
+          FROM memory_segment_times t WHERE ${overlaps}
+        ) SELECT s.id segment_id, s.memory_id, s.revision_id, s.path, s.text,
+          t.start_at, t.end_at, t.basis, 1.0 rank_value
+        FROM memory_segments s JOIN matching_times t ON t.segment_id = s.id AND t.ordinal = 1
+        JOIN memory_revisions r ON r.id = s.revision_id JOIN memories m ON m.id = s.memory_id
+        WHERE ${candidates.sql}
+        ORDER BY CASE t.basis WHEN 'content' THEN 0 ELSE 1 END, s.id LIMIT ?`,
+        ...windows.flatMap((window) => [window.end, window.start]),
+        ...candidates.parameters,
+        limit,
+      );
+      rankedRows.push(...datedRows);
+    }
+    const spans = new Map<string, Array<{ start: number; end: number }>>();
+    if (rankedRows.length > 0) {
+      const anchors = this.allRows(
+        `SELECT t.segment_id, t.passage_start, t.passage_end FROM memory_segment_times t
+         WHERE t.segment_id IN (${rankedRows.map(() => '?').join(',')}) AND (${overlaps})`,
+        ...rankedRows.map((row) => String(row.segment_id)),
+        ...windows.flatMap((window) => [window.end, window.start]),
+      );
+      for (const anchor of anchors) {
+        const id = String(anchor.segment_id);
+        const list = spans.get(id) ?? [];
+        list.push({ start: Number(anchor.passage_start), end: Number(anchor.passage_end) });
+        spans.set(id, list);
+      }
+    }
+    return rankedRows.map((row) => {
+      const original = String(row.text);
+      const text = passageText(
+        { id: String(row.segment_id), path: String(row.path), text: original },
+        spans.get(String(row.segment_id)) ?? [{ start: 0, end: original.length }],
+      );
+      return {
+        segmentId: String(row.segment_id),
+        memoryId: String(row.memory_id),
+        revisionId: String(row.revision_id),
+        path: String(row.path),
+        text,
+        ...(text !== original ? { originalText: original } : {}),
+        rankValue: Number(row.rank_value),
+        timeMatch: {
+          start: String(row.start_at),
+          end: String(row.end_at),
+          basis: row.basis === 'content' ? 'content' : 'observed',
+        },
+      };
+    });
   }
 
   public indexVectors(

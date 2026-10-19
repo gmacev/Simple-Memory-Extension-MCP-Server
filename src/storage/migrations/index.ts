@@ -12,6 +12,9 @@ import { embeddingIndexGenerationsSql } from './007-embedding-index-generations.
 import { currentEmbeddingGenerationSql } from './008-current-embedding-generation.js';
 import { crossSpaceLinksSql } from './009-cross-space-links.js';
 import { temporalEvidenceSql } from './010-temporal-evidence.js';
+import { multilingualTemporalProjectionSql } from './011-multilingual-temporal-projection.js';
+
+import { temporalPassagesSql } from './012-temporal-passages.js';
 
 interface Migration {
   version: number;
@@ -43,6 +46,8 @@ const migrations = [
   { version: 8, name: 'current-embedding-generation', sql: currentEmbeddingGenerationSql },
   { version: 9, name: 'cross-space-links', sql: crossSpaceLinksSql },
   { version: 10, name: 'temporal-evidence', sql: temporalEvidenceSql },
+  { version: 11, name: 'multilingual-temporal-projection', sql: multilingualTemporalProjectionSql },
+  { version: 12, name: 'temporal-passages', sql: temporalPassagesSql },
 ] satisfies readonly Migration[];
 
 export const currentSchemaVersion = migrations.at(-1)?.version ?? 0;

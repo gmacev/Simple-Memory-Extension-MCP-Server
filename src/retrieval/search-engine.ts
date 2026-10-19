@@ -15,6 +15,7 @@ import type { MemoryStore, RankedSegment } from '../storage/memory-store.js';
 import { datedExcerpt, queryTimeWindows, recordedSnapshotTime } from './temporal.js';
 
 interface FusedCandidate {
+  temporalPassage?: boolean;
   memoryId: string;
   revisionId: string;
   excerpt: string;
@@ -45,6 +46,7 @@ const DECISIVE_RERANKER_SCORE = 0.5;
 const DECISIVE_RUNNER_UP_RATIO = 0.1;
 
 function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
+  if (candidate.temporalPassage) return candidate.excerpt.slice(0, EXCERPT_LIMIT);
   const lines = candidate.record.revision.searchableText.split('\n');
   const fieldPrefix = `${candidate.path}:`;
   const matchedIndex = lines.findIndex((line) => line.startsWith(fieldPrefix));
@@ -142,6 +144,7 @@ function addRanking(
             : segment.text,
         path: segment.path,
         rerankSegments: [segment.text],
+        ...(segment.originalText ? { temporalPassage: true } : {}),
         ...(source === 'exact' ? { exactRankValue: segment.rankValue } : {}),
         score,
       });
@@ -167,8 +170,11 @@ function addRanking(
       if (source === 'temporal')
         existing.rerankSegments = [
           segment.text,
-          ...existing.rerankSegments.filter((text) => text !== segment.text),
+          ...existing.rerankSegments.filter(
+            (text) => text !== segment.text && text !== segment.originalText,
+          ),
         ];
+      if (segment.originalText) existing.temporalPassage = true;
       if (source === 'exact') existing.exactRankValue = segment.rankValue;
       existing.excerpt =
         source === 'temporal' && segment.timeMatch

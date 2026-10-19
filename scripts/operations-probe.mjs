@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ import { acquireDatabaseServerLease } from '../dist/operations/database-runtime.
 import { currentSchemaVersion } from '../dist/storage/migrations/index.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageVersion = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const dataDir = mkdtempSync(path.join(tmpdir(), 'simple-memory-operations-'));
 
 function assert(condition, message) {
@@ -61,7 +62,10 @@ function probeCliSurface() {
     { cwd: root, env: environment, encoding: 'utf8' },
   );
   assert(jitlessVersion.status === 0, 'CLI must remain available when code generation is disabled');
-  assert(jitlessVersion.stdout.trim() === '3.10.3', 'jitless CLI must report the current version');
+  assert(
+    jitlessVersion.stdout.trim() === packageVersion,
+    'jitless CLI must report the current version',
+  );
 
   const show = spawnSync(process.execPath, [path.join(root, 'dist', 'cli.js'), 'config', 'show'], {
     cwd: root,

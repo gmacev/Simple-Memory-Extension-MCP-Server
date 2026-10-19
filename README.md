@@ -242,7 +242,13 @@ Clear calendar constraints such as `on 8 January 2026`, multiple dates, or `the 
 
 `atTime` selects the revision recorded by that instant; `validAt` selects real-world validity. A question explicitly asking what was *recorded* or *known as of* an unambiguous date can select `atTime` automatically, with the applied timestamp disclosed in `temporal`. Plain event dates do not select recorded-history snapshots. Explicit `atTime` takes precedence. For uncertain temporal references, inspect the full memory or its revision history rather than interpreting a related excerpt as proof.
 
+For time-specific questions in any language, the calling agent should express the intended event period through `timeWindows`, recorded history through `atTime`, or real-world validity through `validAt`. Keep the query in the same language as the memories. This uses the agent's existing tool-argument reasoning and adds no locator model or inference call. Automatic natural-language relation routing remains a conservative English convenience; recognition of a date alone does not distinguish “on” from “before” in arbitrary prose.
+
+Stored evidence can contain full Gregorian dates in localized ICU formats, including grammatical month forms and native decimal digits. One shared normalizer uses generated ICU/CLDR data (`scripts/generate-locale-date-data.mjs`); no language detector, translation service, or per-language parser is installed. Numeric-only regional dates and conflicting interpretations are rejected rather than assigned a guessed locale. Coverage is limited to recognized full-date formats, not arbitrary natural-language expressions or all calendars. The temporal channel also admits bounded date-only candidates when lexical matching cannot handle the script, while retaining normal lexical/semantic retrieval and the existing rerank budget.
+
 Agents can also read complete memories and revision histories through MCP resources.
+
+For segments containing several explicit dates, the temporal channel associates dates with sentence, clause or dated-heading passages. It supplies matching original-text slices to the reranker and excerpt, retaining continuation text and all requested date windows. Single-date segments keep their existing context. Dates in the same unsplit clause remain together; passage boundaries are structural evidence, not a claim that every temporal relationship has been understood. Full memories remain available through the read tools. Passage offsets are derived metadata and do not require re-embedding.
 
 ## Environment variables
 

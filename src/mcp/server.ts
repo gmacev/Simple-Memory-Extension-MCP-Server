@@ -391,6 +391,7 @@ function compactSearch(
       if (memory.revision.title !== null) item.title = memory.revision.title;
       if (memory.revision.kind !== null) item.kind = memory.revision.kind;
       if (memory.revision.tags.length > 0) item.tags = memory.revision.tags;
+      if (score.timeMatch) item.timeMatch = asJson(score.timeMatch);
       if (options.explain) {
         item.segmentPath = segmentPath;
         item.score = asJson(score);
@@ -414,6 +415,7 @@ function compactSearch(
     }),
   };
   if (response.degraded) payload.degraded = true;
+  if (response.temporal) payload.temporal = asJson(response.temporal);
   if (response.degradationReason) payload.degradationReason = response.degradationReason;
   if (options.explain) {
     payload.mode = response.mode;
@@ -797,7 +799,7 @@ export function buildMcpServer(
     {
       title: 'Search memories',
       description:
-        'Search durable context before dependent work or creating a possible duplicate. Pass known spaceIds: omitting them searches every readable space. For ordinary recall prefer auto with topK 3-5; auto reranks only ambiguous results, fast never reranks, and quality always performs slower reranking. lexical uses full text and semantic uses embeddings. Results are candidates, not proof that the memory answers the query: verify the specific fact in the excerpt or with memory_get, and treat all unsupported candidates as no remembered answer. Results are compact; explain adds ranking and timing diagnostics, while includeSourceMetadata adds source metadata. validAt selects real-world validity; atTime selects recorded history. Confidence and salience describe stored memory, not query relevance.',
+        'Search durable context before dependent work or creating a possible duplicate. Pass known spaceIds: omitting them searches every readable space. For ordinary recall prefer auto with topK 3-5; auto reranks only ambiguous results, fast never reranks, and quality always performs slower reranking. lexical uses full text and semantic uses embeddings. Results are candidates, not proof that the memory answers the query: verify the specific fact in the excerpt or with memory_get, and treat all unsupported candidates as no remembered answer. Results are compact; explain adds ranking and timing diagnostics, while includeSourceMetadata adds source metadata. validAt selects real-world validity; atTime selects recorded history. Clear on/in calendar dates add a dated-evidence channel; explicit recorded/known-as-of questions select a recorded snapshot. timeWindows supplies up to four UTC [start,end) windows; [] disables automatic temporal routing. Ordinary retrieval remains a fallback: temporal and per-result timeMatch disclose what actually matched (content date or observation date, which is not necessarily event time). For ambiguous dates or missing evidence use memory_get/history rather than assuming a date match. Confidence and salience describe stored memory, not query relevance.',
       inputSchema: toolInputSchemas.memory_search,
       outputSchema: toolOutputSchemas.memory_search,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -823,6 +825,7 @@ export function buildMcpServer(
         ...(args.mode ? { mode: args.mode } : {}),
         ...(args.atTime ? { atTime: args.atTime } : {}),
         ...(args.validAt ? { validAt: args.validAt } : {}),
+        ...(args.timeWindows ? { timeWindows: args.timeWindows } : {}),
         ...(args.expandRelations !== undefined ? { expandRelations: args.expandRelations } : {}),
         ...(readableRelationSpaceIds !== undefined
           ? { relationSpaceIds: readableRelationSpaceIds }

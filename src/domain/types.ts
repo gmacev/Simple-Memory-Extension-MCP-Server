@@ -270,6 +270,17 @@ export interface MemoryListPage {
   nextCursor: string | null;
 }
 
+export interface TimeWindow {
+  start: string;
+  end: string;
+}
+
+export interface SearchTemporalContext {
+  windows: TimeWindow[];
+  source: 'query' | 'explicit';
+  atTime?: string;
+}
+
 export interface SearchOptions {
   query: string;
   spaceIds?: string[];
@@ -282,12 +293,15 @@ export interface SearchOptions {
   mode?: 'auto' | 'fast' | 'quality' | 'lexical' | 'semantic';
   atTime?: string;
   validAt?: string;
+  timeWindows?: TimeWindow[];
   expandRelations?: boolean;
   includeSourceMetadata?: boolean;
   relationSpaceIds?: string[];
 }
 
 export interface SearchScoreExplanation {
+  temporalRank?: number;
+  timeMatch?: TimeWindow & { basis: 'content' | 'observed' };
   lexicalRank?: number;
   semanticRank?: number;
   relationBoost?: number;
@@ -312,6 +326,7 @@ export interface SearchStageTimings {
 }
 
 export interface SearchResponse {
+  temporal?: SearchTemporalContext;
   query: string;
   mode: string;
   degraded: boolean;

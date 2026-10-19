@@ -7,10 +7,12 @@ import type {
   SearchResult,
   SearchScoreExplanation,
   SearchStageTimings,
+  SearchTemporalContext,
 } from '../domain/types.js';
 import type { Logger } from '../logger.js';
 import type { ModelClient } from '../models/model-client.js';
 import type { MemoryStore, RankedSegment } from '../storage/memory-store.js';
+import { datedExcerpt, queryTimeWindows, recordedSnapshotTime } from './temporal.js';
 
 interface FusedCandidate {
   memoryId: string;
@@ -25,6 +27,9 @@ interface FusedCandidate {
 
 const RRF_CONSTANT = 60;
 const DEFAULT_TOP_K = 5;
+// Equal date matches retain the existing relevance order; observation time is weaker evidence.
+const CONTENT_TIME_BOOST = 0.085;
+const OBSERVED_TIME_BOOST = 0.055;
 
 function roundStageMs(value: number): number {
   return Math.round(value * 100) / 100;
@@ -95,24 +100,46 @@ function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRec
 function addRanking(
   candidates: Map<string, FusedCandidate>,
   ranked: RankedSegment[],
-  source: 'exact' | 'lexical' | 'semantic',
+  source: 'exact' | 'lexical' | 'semantic' | 'temporal',
 ): void {
   const seen = new Set<string>();
+  const alreadyAligned = new Set<string>();
+  if (source === 'temporal') {
+    for (const segment of ranked) {
+      const candidate = candidates.get(segment.memoryId);
+      if (candidate?.path === segment.path && candidate.excerpt === segment.text)
+        alreadyAligned.add(segment.memoryId);
+    }
+  }
   for (const segment of ranked) {
     if (seen.has(segment.memoryId)) continue;
     seen.add(segment.memoryId);
     const rank = seen.size;
-    const contribution = source === 'exact' ? 0.1 / rank : 1 / (RRF_CONSTANT + rank);
+    const contribution =
+      source === 'exact'
+        ? 0.1 / rank
+        : source === 'temporal'
+          ? segment.timeMatch?.basis === 'observed'
+            ? OBSERVED_TIME_BOOST
+            : CONTENT_TIME_BOOST
+          : 1 / (RRF_CONSTANT + rank);
     const existing = candidates.get(segment.memoryId);
     if (!existing) {
       const score: SearchScoreExplanation = { fusedScore: contribution };
       if (source === 'exact') score.exactBoost = contribution;
       else if (source === 'lexical') score.lexicalRank = rank;
-      else score.semanticRank = rank;
+      else if (source === 'semantic') score.semanticRank = rank;
+      else {
+        score.temporalRank = rank;
+        if (segment.timeMatch) score.timeMatch = segment.timeMatch;
+      }
       candidates.set(segment.memoryId, {
         memoryId: segment.memoryId,
         revisionId: segment.revisionId,
-        excerpt: segment.text,
+        excerpt:
+          source === 'temporal' && segment.timeMatch
+            ? datedExcerpt(segment.text, segment.timeMatch, EXCERPT_LIMIT)
+            : segment.text,
         path: segment.path,
         rerankSegments: [segment.text],
         ...(source === 'exact' ? { exactRankValue: segment.rankValue } : {}),
@@ -126,10 +153,27 @@ function addRanking(
     existing.score.fusedScore += contribution;
     if (source === 'exact') existing.score.exactBoost = contribution;
     else if (source === 'lexical') existing.score.lexicalRank = rank;
-    else existing.score.semanticRank = rank;
-    if (source === 'exact') {
-      existing.exactRankValue = segment.rankValue;
-      existing.excerpt = segment.text;
+    else if (source === 'semantic') existing.score.semanticRank = rank;
+    else {
+      existing.score.temporalRank = rank;
+      if (segment.timeMatch) existing.score.timeMatch = segment.timeMatch;
+    }
+    if (source === 'exact' || source === 'temporal') {
+      if (source === 'temporal' && alreadyAligned.has(segment.memoryId)) {
+        if (segment.timeMatch)
+          existing.excerpt = datedExcerpt(existing.excerpt, segment.timeMatch, EXCERPT_LIMIT);
+        continue;
+      }
+      if (source === 'temporal')
+        existing.rerankSegments = [
+          segment.text,
+          ...existing.rerankSegments.filter((text) => text !== segment.text),
+        ];
+      if (source === 'exact') existing.exactRankValue = segment.rankValue;
+      existing.excerpt =
+        source === 'temporal' && segment.timeMatch
+          ? datedExcerpt(segment.text, segment.timeMatch, EXCERPT_LIMIT)
+          : segment.text;
       existing.path = segment.path;
       existing.revisionId = segment.revisionId;
       continue;
@@ -228,6 +272,35 @@ export class SearchEngine {
 
   public async search(options: SearchOptions): Promise<SearchResponse> {
     const started = performance.now();
+    const inferredAtTime =
+      options.atTime === undefined && options.timeWindows === undefined
+        ? recordedSnapshotTime(options.query)
+        : undefined;
+    if (inferredAtTime) options = { ...options, atTime: inferredAtTime };
+    const windows = (
+      options.timeWindows ?? (options.atTime ? [] : queryTimeWindows(options.query))
+    ).map((window) => ({
+      start: new Date(window.start).toISOString(),
+      end: new Date(window.end).toISOString(),
+    }));
+    if (windows.length > 4) throw new Error('timeWindows supports at most four windows');
+    for (const window of windows) {
+      if (
+        !Number.isFinite(Date.parse(window.start)) ||
+        !Number.isFinite(Date.parse(window.end)) ||
+        window.start >= window.end
+      ) {
+        throw new Error('timeWindows must contain valid start < end timestamps');
+      }
+    }
+    const temporal: SearchTemporalContext | undefined =
+      windows.length > 0 || inferredAtTime
+        ? {
+            windows,
+            source: options.timeWindows ? 'explicit' : 'query',
+            ...(inferredAtTime ? { atTime: inferredAtTime } : {}),
+          }
+        : undefined;
     const mode = options.mode ?? 'auto';
     const topK = Math.max(1, Math.min(options.topK ?? DEFAULT_TOP_K, 50));
     const filters = {
@@ -283,6 +356,7 @@ export class SearchEngine {
           results: exactResults,
           timingMs: roundStageMs(performance.now() - started),
           stageTimings: stages,
+          ...(temporal ? { temporal } : {}),
         };
       }
     }
@@ -339,6 +413,18 @@ export class SearchEngine {
       }
     }
 
+    if (windows.length > 0) {
+      addRanking(
+        fused,
+        this.store.temporalCandidates(
+          options.query,
+          filters,
+          windows,
+          this.config.lexicalCandidates,
+        ),
+        'temporal',
+      );
+    }
     const queryNormalized = options.query.trim().toLocaleLowerCase();
     const recordsByRevisionId = this.store.getMemoriesByRevisionIds(
       [...fused.values()].map((candidate) => candidate.revisionId),
@@ -436,6 +522,7 @@ export class SearchEngine {
       score: candidate.score,
     }));
     const response: SearchResponse = {
+      ...(temporal ? { temporal } : {}),
       query: options.query,
       mode,
       degraded,

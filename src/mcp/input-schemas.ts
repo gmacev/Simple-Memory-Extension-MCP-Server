@@ -151,6 +151,16 @@ export const toolInputSchemas = {
       mode: z.enum(['auto', 'fast', 'quality', 'lexical', 'semantic']).optional(),
       atTime: dateSchema.optional(),
       validAt: dateSchema.optional(),
+      timeWindows: z
+        .array(
+          z
+            .object({ start: dateSchema, end: dateSchema })
+            .refine((window) => window.start < window.end, {
+              message: 'start must be earlier than end',
+            }),
+        )
+        .max(4)
+        .optional(),
       expandRelations: z.boolean().optional(),
       explain: z.boolean().optional(),
       includeSourceMetadata: z.boolean().optional(),

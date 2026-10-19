@@ -167,7 +167,10 @@ function run() {
   const logger = new Logger('error');
   let store = new MemoryStore(config, logger);
   const migration = store.migrationStatus();
-  assert(migration.fromVersion === 6 && migration.toVersion === 9, 'v6 should migrate through v9');
+  assert(
+    migration.fromVersion === 6 && migration.toVersion === 10,
+    'v6 should migrate through v10',
+  );
   assert(
     migration.backupPath && existsSync(migration.backupPath),
     'migration should create a backup',

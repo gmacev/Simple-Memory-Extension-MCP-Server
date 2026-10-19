@@ -159,6 +159,15 @@ const feedbackAcknowledgementOutputSchema = compileSchema(
 
 const searchScoreOutputSchema = z
   .object({
+    temporalRank: z.number().int().positive().optional(),
+    timeMatch: z
+      .object({
+        start: isoDateTimeSchema,
+        end: isoDateTimeSchema,
+        basis: z.enum(['content', 'observed']),
+      })
+      .strict()
+      .optional(),
     lexicalRank: z.number().int().positive().optional(),
     semanticRank: z.number().int().positive().optional(),
     relationBoost: z.number().optional(),
@@ -185,6 +194,14 @@ const searchResultOutputSchema = z
     tags: z.array(z.string()).optional(),
     segmentPath: z.string().optional(),
     score: searchScoreOutputSchema.optional(),
+    timeMatch: z
+      .object({
+        start: isoDateTimeSchema,
+        end: isoDateTimeSchema,
+        basis: z.enum(['content', 'observed']),
+      })
+      .strict()
+      .optional(),
     salience: z.number().min(0).max(1).optional(),
     confidence: z.number().min(0).max(1).optional(),
     observedAt: isoDateTimeSchema.optional(),
@@ -360,6 +377,14 @@ export const toolOutputSchemas = {
   ),
   memory_search: z
     .object({
+      temporal: z
+        .object({
+          windows: z.array(z.object({ start: isoDateTimeSchema, end: isoDateTimeSchema }).strict()),
+          source: z.enum(['query', 'explicit']),
+          atTime: isoDateTimeSchema.optional(),
+        })
+        .strict()
+        .optional(),
       results: z.array(searchResultOutputSchema),
       degraded: z.literal(true).optional(),
       degradationReason: z.string().optional(),

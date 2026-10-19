@@ -42,15 +42,18 @@ import type {
   SpaceListPage,
   SpaceRecord,
   SpaceState,
+  TimeWindow,
 } from '../domain/types.js';
 import { searchableProjection } from '../indexing/projector.js';
 import type { Logger } from '../logger.js';
+import { segmentTimes } from '../retrieval/temporal.js';
 import { compileSchema } from '../validation.js';
 import { applyMigrations, type MigrationStatus } from './migrations/index.js';
 
 type Row = Record<string, unknown>;
 
 export interface RankedSegment {
+  timeMatch?: TimeWindow & { basis: 'content' | 'observed' };
   segmentId: string;
   memoryId: string;
   revisionId: string;
@@ -1878,8 +1881,87 @@ export class MemoryStore {
           tags.join(' '),
         );
       }
+      this.projectSegmentTimes(revisionId);
     });
     transaction();
+  }
+
+  private projectSegmentTimes(revisionId: string): void {
+    const revision = this.requireRow(
+      'SELECT observed_at FROM memory_revisions WHERE id = ?',
+      revisionId,
+    );
+    const segments = this.allRows(
+      'SELECT id, path, text FROM memory_segments WHERE revision_id = ?',
+      revisionId,
+    ).map((row) => ({ id: String(row.id), path: String(row.path), text: String(row.text) }));
+    const insert = this.prepare(
+      'INSERT OR IGNORE INTO memory_segment_times(segment_id, start_at, end_at, basis) VALUES (?, ?, ?, ?)',
+    );
+    for (const anchor of segmentTimes(segments, optionalString(revision.observed_at))) {
+      insert.run(anchor.segmentId, anchor.start, anchor.end, anchor.basis);
+    }
+    this.prepare('INSERT OR IGNORE INTO memory_temporal_revisions(revision_id) VALUES (?)').run(
+      revisionId,
+    );
+  }
+
+  private ensureTemporalProjection(): void {
+    // Derived metadata only: existing text/vector projections remain byte-identical.
+    const missing = `SELECT r.id AS revision_id FROM memory_revisions r
+      WHERE NOT EXISTS (SELECT 1 FROM memory_temporal_revisions p WHERE p.revision_id = r.id)
+      AND EXISTS (SELECT 1 FROM memory_segments s WHERE s.revision_id = r.id)`;
+    if (!this.getRow(`${missing} LIMIT 1`)) return;
+    const project = this.database.transaction(() => {
+      for (const row of this.allRows(missing)) {
+        this.projectSegmentTimes(String(row.revision_id));
+      }
+    });
+    project.immediate();
+  }
+
+  public temporalCandidates(
+    query: string,
+    filters: CandidateFilters,
+    windows: TimeWindow[],
+    limit: number,
+  ): RankedSegment[] {
+    if (windows.length === 0) return [];
+    this.ensureTemporalProjection();
+    const candidates = this.candidateClauses(filters);
+    const terms = [...new Set(query.normalize('NFKC').match(/[\p{L}\p{N}_-]+/gu) ?? [])];
+    if (terms.length === 0) return [];
+    const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(' OR ');
+    const overlaps = windows.map(() => '(t.start_at < ? AND t.end_at > ?)').join(' OR ');
+    return this.allRows(
+      `WITH matching_times AS MATERIALIZED (
+        SELECT segment_id, start_at, end_at, basis,
+          ROW_NUMBER() OVER (PARTITION BY segment_id ORDER BY CASE basis WHEN 'content' THEN 0 ELSE 1 END, start_at) AS ordinal
+        FROM memory_segment_times t WHERE ${overlaps}
+      ) SELECT s.id segment_id, s.memory_id, s.revision_id, s.path, s.text,
+        t.start_at, t.end_at, t.basis, bm25(memory_fts, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.5) rank_value
+      FROM memory_fts f JOIN memory_segments s ON s.id = f.segment_id
+      JOIN matching_times t ON t.segment_id = s.id AND t.ordinal = 1
+      JOIN memory_revisions r ON r.id = s.revision_id JOIN memories m ON m.id = s.memory_id
+      WHERE memory_fts MATCH ? AND ${candidates.sql}
+      ORDER BY rank_value, CASE t.basis WHEN 'content' THEN 0 ELSE 1 END, s.id, t.start_at LIMIT ?`,
+      ...windows.flatMap((window) => [window.end, window.start]),
+      match,
+      ...candidates.parameters,
+      limit,
+    ).map((row) => ({
+      segmentId: String(row.segment_id),
+      memoryId: String(row.memory_id),
+      revisionId: String(row.revision_id),
+      path: String(row.path),
+      text: String(row.text),
+      rankValue: Number(row.rank_value),
+      timeMatch: {
+        start: String(row.start_at),
+        end: String(row.end_at),
+        basis: row.basis === 'content' ? 'content' : 'observed',
+      },
+    }));
   }
 
   public indexVectors(

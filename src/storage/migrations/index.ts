@@ -11,6 +11,7 @@ import { scalingIndexesAndSpaceSearchSql } from './006-scaling-indexes-and-space
 import { embeddingIndexGenerationsSql } from './007-embedding-index-generations.js';
 import { currentEmbeddingGenerationSql } from './008-current-embedding-generation.js';
 import { crossSpaceLinksSql } from './009-cross-space-links.js';
+import { temporalEvidenceSql } from './010-temporal-evidence.js';
 
 interface Migration {
   version: number;
@@ -41,6 +42,7 @@ const migrations = [
   { version: 7, name: 'embedding-index-generations', sql: embeddingIndexGenerationsSql },
   { version: 8, name: 'current-embedding-generation', sql: currentEmbeddingGenerationSql },
   { version: 9, name: 'cross-space-links', sql: crossSpaceLinksSql },
+  { version: 10, name: 'temporal-evidence', sql: temporalEvidenceSql },
 ] satisfies readonly Migration[];
 
 export const currentSchemaVersion = migrations.at(-1)?.version ?? 0;

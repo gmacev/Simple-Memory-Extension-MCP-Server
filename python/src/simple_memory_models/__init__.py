@@ -1,3 +1,3 @@
 """Model inference worker used by the Simple Memory MCP server."""
 
-__version__ = "3.10.3"
+__version__ = "3.11.0"

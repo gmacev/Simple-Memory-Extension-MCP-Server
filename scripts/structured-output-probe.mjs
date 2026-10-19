@@ -186,6 +186,7 @@ try {
     ],
     confidence: 0.96,
     salience: 0.85,
+    observedAt: '2026-01-08T12:00:00.000Z',
   });
 
   const memory = await call('memory_get', { memoryId: canonical.id });
@@ -238,6 +239,23 @@ try {
     explain: true,
     includeSourceMetadata: true,
   });
+  const temporalSearch = await call('memory_search', {
+    query: 'STRUCTURED-OUTPUT-PROBE',
+    spaceIds: [space.id],
+    mode: 'lexical',
+    timeWindows: [{ start: '2026-01-08T00:00:00.000Z', end: '2026-01-09T00:00:00.000Z' }],
+  });
+  assert.equal(temporalSearch.temporal?.source, 'explicit', 'temporal plan must be visible');
+  assert.equal(
+    temporalSearch.results[0]?.timeMatch?.basis,
+    'observed',
+    'observation basis must be visible without explain',
+  );
+  assert.equal(
+    temporalSearch.results[0]?.score,
+    undefined,
+    'temporal search still hides scores by default',
+  );
   assert.equal(explainedSearch.mode, 'lexical', 'explained search mode');
   assert.equal(typeof explainedSearch.timingMs, 'number', 'explained search timing');
   assert.equal(typeof explainedSearch.results[0]?.score?.fusedScore, 'number', 'explained score');

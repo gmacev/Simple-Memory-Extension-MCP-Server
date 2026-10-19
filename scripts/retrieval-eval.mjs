@@ -51,6 +51,9 @@ const RETRIEVAL_OPTION_KEYS = [
   'states',
   'minConfidence',
   'minSalience',
+  'atTime',
+  'validAt',
+  'timeWindows',
 ];
 
 function retrievalOptions(entry, defaultMode, defaultTopK) {

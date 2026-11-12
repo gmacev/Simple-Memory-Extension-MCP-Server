@@ -8,23 +8,19 @@ from typing import Any
 
 import numpy as np
 import torch
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from .prefix_reuse import PrefixReuseState, predict_with_prefix_reuse
+from .reranker import Reranker
 from .tokenization import count_token_lengths
 
 DEFAULT_EMBEDDING_MODEL = "codefuse-ai/F2LLM-v2-330M"
-DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+DEFAULT_RERANKER_MODEL = "hindsight-ai/hs-rerank-1"
 DEFAULT_EMBEDDING_REVISION = "1b8f03017b9f12220a3ab3a1d0b1fbe441cede93"
-DEFAULT_RERANKER_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+DEFAULT_RERANKER_REVISION = "927f5be31280298a51cf29af8a29cb111ed812c5"
 DEFAULT_QUERY_INSTRUCTION = (
     "Given a memory query, retrieve stored information useful for answering the query "
     "or guiding an action."
-)
-DEFAULT_RERANK_INSTRUCTION = (
-    "Given a memory query, determine whether the candidate memory contains information "
-    "useful for answering or acting on it."
 )
 
 
@@ -53,10 +49,7 @@ def preferred_device() -> str:
 class RuntimeConfig:
     embedding_model: str
     embedding_revision: str
-    reranker_model: str
-    reranker_revision: str
     query_instruction: str
-    rerank_instruction: str
     device: str
     embedding_batch_size: int
     rerank_batch_size: int
@@ -75,15 +68,8 @@ class RuntimeConfig:
             embedding_revision=os.getenv(
                 "SIMPLE_MEMORY_EMBEDDING_REVISION", DEFAULT_EMBEDDING_REVISION
             ),
-            reranker_model=os.getenv("SIMPLE_MEMORY_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
-            reranker_revision=os.getenv(
-                "SIMPLE_MEMORY_RERANKER_REVISION", DEFAULT_RERANKER_REVISION
-            ),
             query_instruction=os.getenv(
                 "SIMPLE_MEMORY_QUERY_INSTRUCTION", DEFAULT_QUERY_INSTRUCTION
-            ),
-            rerank_instruction=os.getenv(
-                "SIMPLE_MEMORY_RERANK_INSTRUCTION", DEFAULT_RERANK_INSTRUCTION
             ),
             device=device,
             embedding_batch_size=int(os.getenv("SIMPLE_MEMORY_EMBED_BATCH_SIZE", "8")),
@@ -96,9 +82,8 @@ class ModelRuntime:
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
         self._embedding: SentenceTransformer | None = None
-        self._reranker: CrossEncoder | None = None
+        self._reranker: Reranker | None = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
-        self._rerank_prefix = PrefixReuseState()
         self._lock = threading.RLock()
 
     @property
@@ -148,18 +133,14 @@ class ModelRuntime:
                 )
             return self._embedding
 
-    def _get_reranker(self) -> CrossEncoder:
+    def _get_reranker(self) -> Reranker:
         with self._lock:
             if self._reranker is None:
-                self._reranker = CrossEncoder(
-                    self.config.reranker_model,
-                    revision=self.config.reranker_revision,
+                self._reranker = Reranker(
+                    DEFAULT_RERANKER_MODEL,
+                    revision=DEFAULT_RERANKER_REVISION,
                     device=self.config.device,
-                    model_kwargs=self._model_kwargs(),
-                    processor_kwargs={"padding_side": "left"},
-                    prompts={"memory": self.config.rerank_instruction},
-                    default_prompt_name="memory",
-                    trust_remote_code=True,
+                    batch_size=self.config.rerank_batch_size,
                     local_files_only=self.config.local_files_only,
                 )
             return self._reranker
@@ -224,28 +205,7 @@ class ModelRuntime:
     def rerank_pairs(self, pairs: list[tuple[str, str]]) -> list[float]:
         if not pairs:
             return []
-        model = self._get_reranker()
-        if (
-            self.config.reranker_model == DEFAULT_RERANKER_MODEL
-            and self.config.reranker_revision == DEFAULT_RERANKER_REVISION
-        ):
-            reused = predict_with_prefix_reuse(
-                model,
-                pairs,
-                self.config.rerank_instruction,
-                self.config.rerank_batch_size,
-                self._rerank_prefix,
-            )
-            if reused is not None:
-                return reused
-        scores = model.predict(
-            pairs,
-            batch_size=self.config.rerank_batch_size,
-            show_progress_bar=False,
-            activation_fn=torch.nn.Sigmoid(),
-        )
-        raw_scores = scores.tolist() if hasattr(scores, "tolist") else list(scores)
-        return [float(score[0] if isinstance(score, list) else score) for score in raw_scores]
+        return self._get_reranker().predict(pairs)
 
     def rerank(self, query: str, documents: list[str]) -> list[float]:
         return self.rerank_pairs([(query, document) for document in documents])
@@ -257,14 +217,12 @@ class ModelRuntime:
         return {
             "embedding_model": self.config.embedding_model,
             "embedding_revision": self.config.embedding_revision,
-            "reranker_model": self.config.reranker_model,
-            "reranker_revision": self.config.reranker_revision,
+            "reranker_model": DEFAULT_RERANKER_MODEL,
+            "reranker_revision": DEFAULT_RERANKER_REVISION,
             "query_instruction_hash": sha256(
                 self.config.query_instruction.encode("utf-8")
             ).hexdigest(),
-            "rerank_instruction_hash": sha256(
-                self.config.rerank_instruction.encode("utf-8")
-            ).hexdigest(),
+            "rerank_instruction_hash": sha256(b"").hexdigest(),
             "device": self.config.device,
             "device_name": self._device_name(),
             "torch_version": torch.__version__,

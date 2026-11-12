@@ -8,10 +8,8 @@ export const DEFAULT_EMBEDDING_REVISION = '1b8f03017b9f12220a3ab3a1d0b1fbe441ced
 export const DEFAULT_EMBEDDING_DIMENSION = 896;
 export const DEFAULT_QUERY_INSTRUCTION =
   'Given a memory query, retrieve stored information useful for answering the query or guiding an action.';
-export const DEFAULT_RERANKER_MODEL = 'Qwen/Qwen3-Reranker-0.6B';
-export const DEFAULT_RERANKER_REVISION = 'e61197ed45024b0ed8a2d74b80b4d909f1255473';
-export const DEFAULT_RERANK_INSTRUCTION =
-  'Given a memory query, determine whether the candidate memory contains information useful for answering or acting on it.';
+export const DEFAULT_RERANKER_MODEL = 'hindsight-ai/hs-rerank-1';
+export const DEFAULT_RERANKER_REVISION = '927f5be31280298a51cf29af8a29cb111ed812c5';
 
 export type TransportMode = 'stdio' | 'http';
 
@@ -30,9 +28,6 @@ export interface AppConfig {
   embeddingModel: string;
   embeddingRevision: string;
   queryInstruction: string;
-  rerankerModel: string;
-  rerankerRevision: string;
-  rerankInstruction: string;
   embeddingDimension: number;
   embeddingBatchSize: number;
   rerankBatchSize: number;
@@ -293,15 +288,6 @@ export function loadConfig(): AppConfig {
       'SIMPLE_MEMORY_QUERY_INSTRUCTION',
       DEFAULT_QUERY_INSTRUCTION,
     ),
-    rerankerModel: nonEmptyEnvironment('SIMPLE_MEMORY_RERANKER_MODEL', DEFAULT_RERANKER_MODEL),
-    rerankerRevision: nonEmptyEnvironment(
-      'SIMPLE_MEMORY_RERANKER_REVISION',
-      DEFAULT_RERANKER_REVISION,
-    ),
-    rerankInstruction: nonEmptyEnvironment(
-      'SIMPLE_MEMORY_RERANK_INSTRUCTION',
-      DEFAULT_RERANK_INSTRUCTION,
-    ),
     embeddingDimension: integerEnvironment(
       'SIMPLE_MEMORY_EMBEDDING_DIMENSION',
       DEFAULT_EMBEDDING_DIMENSION,
@@ -339,9 +325,9 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
       embeddingRevision: config.embeddingRevision,
       embeddingDimension: config.embeddingDimension,
       queryInstruction: config.queryInstruction,
-      rerankerModel: config.rerankerModel,
-      rerankerRevision: config.rerankerRevision,
-      rerankInstruction: config.rerankInstruction,
+      rerankerModel: DEFAULT_RERANKER_MODEL,
+      rerankerRevision: DEFAULT_RERANKER_REVISION,
+      rerankInstruction: '',
       embeddingBatchSize: config.embeddingBatchSize,
       rerankBatchSize: config.rerankBatchSize,
     },

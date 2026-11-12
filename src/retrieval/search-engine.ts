@@ -43,7 +43,7 @@ const MIN_RERANK_CANDIDATES = 3;
 const RERANK_CANDIDATE_MULTIPLIER = 2;
 const AUTO_CLEAR_LEAD_RATIO = 1.1;
 const DECISIVE_RERANKER_SCORE = 0.5;
-const DECISIVE_RUNNER_UP_RATIO = 0.1;
+const DECISIVE_RUNNER_UP_RATIO = 0.05;
 
 function contextualExcerpt(candidate: FusedCandidate & { record: MemorySearchRecord }): string {
   if (candidate.temporalPassage) return candidate.excerpt.slice(0, EXCERPT_LIMIT);

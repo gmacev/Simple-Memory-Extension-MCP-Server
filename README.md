@@ -21,7 +21,7 @@ Memories stay local and persistent. Agents can search, revise, connect, archive,
 Simple Memory uses two local models:
 
 - **F2LLM-v2-330M** converts memories and queries into vectors for fast multilingual semantic retrieval.
-- **Qwen3-Reranker-0.6B** reviews the best candidates and improves their final ordering.
+- **hs-rerank-1** scores candidate memories against the query and improves their final ordering.
 
 They were selected to combine a smaller, faster embedding model with strong final reranking while remaining practical to run locally. Inference automatically prefers a supported GPU and falls back to CPU.
 
@@ -72,6 +72,8 @@ npm run update
 ```
 
 Restart the MCP client afterward.
+
+Starting with v3.13.0, Simple Memory uses its pinned hs-rerank-1 revision and plain query–document pairs. Remove any custom reranker model, revision, or instruction settings from your client configuration or environment. The server ignores those settings.
 
 ## Connect your agent
 
@@ -309,16 +311,15 @@ Relationships may cross spaces. Creating or removing one requires write access t
 | --- | --- | --- |
 | `SIMPLE_MEMORY_EMBEDDING_MODEL` | Embedding model | `codefuse-ai/F2LLM-v2-330M` |
 | `SIMPLE_MEMORY_EMBEDDING_REVISION` | Embedding model revision | Built-in pinned revision |
-| `SIMPLE_MEMORY_RERANKER_MODEL` | Reranking model | `Qwen/Qwen3-Reranker-0.6B` |
-| `SIMPLE_MEMORY_RERANKER_REVISION` | Reranking model revision | Built-in pinned revision |
 | `SIMPLE_MEMORY_EMBEDDING_DIMENSION` | Stored vector dimensions | `896` |
 | `SIMPLE_MEMORY_QUERY_INSTRUCTION` | Embedding retrieval instruction | Built-in generic instruction |
-| `SIMPLE_MEMORY_RERANK_INSTRUCTION` | Reranking instruction | Built-in generic instruction |
 | `SIMPLE_MEMORY_EMBED_BATCH_SIZE` | Embedding batch size | `8` |
 | `SIMPLE_MEMORY_RERANK_BATCH_SIZE` | Reranking batch size | `4` |
 | `SIMPLE_MEMORY_LEXICAL_CANDIDATES` | Lexical candidates considered | `100` |
 | `SIMPLE_MEMORY_SEMANTIC_CANDIDATES` | Semantic candidates considered | `100` |
 | `SIMPLE_MEMORY_RERANK_CANDIDATES` | Maximum candidates sent to the reranker | `30` |
+
+Intel Macs run the published hs-rerank-1 ONNX export on CPU. Other platforms use PyTorch.
 
 Concurrent model work is bounded, batched where compatible, and fairly interleaved so searches and indexing share one local worker without unbounded waiting.
 
@@ -332,6 +333,8 @@ Changing the embedding model, revision, dimensions, or query instruction causes 
 | `SIMPLE_MEMORY_UV` | Path to a specific `uv` executable | Automatically located |
 | `SIMPLE_MEMORY_PYTHON` | Path to the Python executable used by the server | Bundled virtual environment |
 | `SIMPLE_MEMORY_PYTHON_PROJECT` | Path to the model-runtime project | Repository `python` directory |
+
+If you supply your own Python environment, install the matching Simple Memory worker from the repository's `python` directory when upgrading.
 
 Standard Hugging Face variables such as `HF_HOME` can also be used to relocate the shared model cache.
 

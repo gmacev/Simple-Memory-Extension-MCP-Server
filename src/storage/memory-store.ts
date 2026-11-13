@@ -100,6 +100,11 @@ interface CandidateFilters {
   validAt?: string;
 }
 
+interface CandidateClauses {
+  sql: string;
+  parameters: unknown[];
+}
+
 interface RevisionRelations {
   sourcesByRevisionId: Map<string, SourceInput[]>;
   tagsByRevisionId: Map<string, string[]>;
@@ -1914,33 +1919,50 @@ export class MemoryStore {
     );
   }
 
-  private ensureTemporalProjection(): void {
-    // Derived metadata only: existing text/vector projections remain byte-identical.
-    const missing = `SELECT r.id AS revision_id FROM memory_revisions r
-      WHERE NOT EXISTS (SELECT 1 FROM memory_temporal_revisions p WHERE p.revision_id = r.id)
-      AND EXISTS (SELECT 1 FROM memory_segments s WHERE s.revision_id = r.id)`;
-    if (!this.getRow(`${missing} LIMIT 1`)) return;
-    const project = this.database.transaction(() => {
-      for (const row of this.allRows(missing)) {
-        this.projectSegmentTimes(String(row.revision_id));
-      }
-    });
-    project.immediate();
-  }
-
   public temporalCandidates(
     query: string,
     filters: CandidateFilters,
     windows: TimeWindow[],
     limit: number,
   ): RankedSegment[] {
-    if (windows.length === 0) return [];
-    this.ensureTemporalProjection();
-    const candidates = this.candidateClauses(filters);
+    if (windows.length === 0 || filters.spaceIds?.length === 0) return [];
     const terms = [...new Set(query.normalize('NFKC').match(/[\p{L}\p{N}_-]+/gu) ?? [])];
     if (terms.length === 0) return [];
     const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(' OR ');
+    const candidates = this.candidateClauses(filters);
+    const missing = `SELECT r.id AS revision_id
+      FROM memories m JOIN memory_revisions r ON r.memory_id = m.id
+      WHERE ${candidates.sql}
+      AND NOT EXISTS (SELECT 1 FROM memory_temporal_revisions p WHERE p.revision_id = r.id)
+      AND EXISTS (SELECT 1 FROM memory_segments s WHERE s.revision_id = r.id)`;
+    const read = () =>
+      this.readTemporalCandidates(match, candidates, filters.spaceIds ?? [], windows, limit);
+
+    // Check completeness and read under the same snapshot. If work is needed,
+    // recheck eligibility under the write lock and read the completed projection there.
+    const projected = this.database.transaction(() =>
+      this.getRow(`${missing} LIMIT 1`, ...candidates.parameters) ? undefined : read(),
+    )();
+    if (projected !== undefined) return projected;
+    return this.database
+      .transaction(() => {
+        for (const row of this.allRows(missing, ...candidates.parameters)) {
+          this.projectSegmentTimes(String(row.revision_id));
+        }
+        return read();
+      })
+      .immediate();
+  }
+
+  private readTemporalCandidates(
+    match: string,
+    candidates: CandidateClauses,
+    spaceIds: string[],
+    windows: TimeWindow[],
+    limit: number,
+  ): RankedSegment[] {
     const overlaps = windows.map(() => '(t.start_at < ? AND t.end_at > ?)').join(' OR ');
+    const windowParameters = windows.flatMap((window) => [window.end, window.start]);
     const rankedRows = this.allRows(
       `WITH matching_times AS MATERIALIZED (
         SELECT segment_id, start_at, end_at, basis,
@@ -1953,7 +1975,7 @@ export class MemoryStore {
       JOIN memory_revisions r ON r.id = s.revision_id JOIN memories m ON m.id = s.memory_id
       WHERE memory_fts MATCH ? AND ${candidates.sql}
       ORDER BY rank_value, CASE t.basis WHEN 'content' THEN 0 ELSE 1 END, s.id, t.start_at LIMIT ?`,
-      ...windows.flatMap((window) => [window.end, window.start]),
+      ...windowParameters,
       match,
       ...candidates.parameters,
       limit,
@@ -1961,18 +1983,26 @@ export class MemoryStore {
     // A dated-evidence channel must also work when full-text tokenization cannot
     // match the query's script (or when the wording is a paraphrase).
     if (rankedRows.length === 0) {
+      const scopeJoin = spaceIds.length
+        ? `JOIN memory_segments scoped ON scoped.id = t.segment_id
+           JOIN memories scoped_memory ON scoped_memory.id = scoped.memory_id`
+        : '';
+      const scopeFilter = spaceIds.length
+        ? `AND scoped_memory.space_id IN (${spaceIds.map(() => '?').join(',')})`
+        : '';
       const datedRows = this.allRows(
         `WITH matching_times AS MATERIALIZED (
           SELECT segment_id, start_at, end_at, basis,
             ROW_NUMBER() OVER (PARTITION BY segment_id ORDER BY CASE basis WHEN 'content' THEN 0 ELSE 1 END, start_at) AS ordinal
-          FROM memory_segment_times t WHERE ${overlaps}
+          FROM memory_segment_times t ${scopeJoin} WHERE (${overlaps}) ${scopeFilter}
         ) SELECT s.id segment_id, s.memory_id, s.revision_id, s.path, s.text,
           t.start_at, t.end_at, t.basis, 1.0 rank_value
         FROM memory_segments s JOIN matching_times t ON t.segment_id = s.id AND t.ordinal = 1
         JOIN memory_revisions r ON r.id = s.revision_id JOIN memories m ON m.id = s.memory_id
         WHERE ${candidates.sql}
         ORDER BY CASE t.basis WHEN 'content' THEN 0 ELSE 1 END, s.id LIMIT ?`,
-        ...windows.flatMap((window) => [window.end, window.start]),
+        ...windowParameters,
+        ...spaceIds,
         ...candidates.parameters,
         limit,
       );
@@ -1984,7 +2014,7 @@ export class MemoryStore {
         `SELECT t.segment_id, t.passage_start, t.passage_end FROM memory_segment_times t
          WHERE t.segment_id IN (${rankedRows.map(() => '?').join(',')}) AND (${overlaps})`,
         ...rankedRows.map((row) => String(row.segment_id)),
-        ...windows.flatMap((window) => [window.end, window.start]),
+        ...windowParameters,
       );
       for (const anchor of anchors) {
         const id = String(anchor.segment_id);
@@ -2185,13 +2215,7 @@ export class MemoryStore {
     }));
   }
 
-  private candidateClauses(
-    filters: CandidateFilters,
-    revisionAlias = 'r',
-  ): {
-    sql: string;
-    parameters: unknown[];
-  } {
+  private candidateClauses(filters: CandidateFilters, revisionAlias = 'r'): CandidateClauses {
     const clauses: string[] = [
       'EXISTS (SELECT 1 FROM spaces space WHERE space.id = m.space_id AND space.deleted_at IS NULL)',
     ];

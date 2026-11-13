@@ -305,6 +305,69 @@ try {
     mode: 'lexical',
   });
   assert(overridden.results.some((r) => r.memory.revision.id === next.revision.id));
+
+  // Recreate the empty derived tables left by a temporal projection migration.
+  // Revisions excluded on the first search must remain available to later searches.
+  store.createSpace({ id: 'cold-scope', name: 'Cold scope' });
+  const coldHistory = add({
+    spaceId: 'cold-scope',
+    content: 'On 8 January 2026 the deployment used historical-config.',
+  });
+  const coldCurrent = store.reviseMemory(
+    coldHistory.id,
+    { content: 'On 8 January 2026 the deployment used current-config.' },
+    coldHistory.revision.id,
+    'probe',
+  );
+  index(coldCurrent);
+  store.database
+    .prepare('UPDATE memory_revisions SET recorded_at=? WHERE id=?')
+    .run('2026-01-01T00:00:00.000Z', coldHistory.revision.id);
+  store.database
+    .prepare('UPDATE memory_revisions SET recorded_at=? WHERE id=?')
+    .run('2026-02-01T00:00:00.000Z', coldCurrent.revision.id);
+  store.database
+    .prepare('UPDATE memory_state_events SET recorded_at=? WHERE memory_id=?')
+    .run('2026-01-01T00:00:00.000Z', coldHistory.id);
+  const coldArchived = add({
+    spaceId: 'cold-scope',
+    content: 'On 8 January 2026 the deployment used archived-config.',
+  });
+  store.setState(coldArchived.id, 'archived');
+  const scoped = { spaceIds: ['cold-scope'] };
+  const queries = [
+    { filters: scoped, expectedRevision: coldCurrent.revision.id },
+    {
+      filters: { ...scoped, atTime: '2026-01-09T00:00:00.000Z' },
+      expectedRevision: coldHistory.revision.id,
+    },
+    {
+      filters: { ...scoped, states: ['archived'] },
+      expectedRevision: coldArchived.revision.id,
+    },
+    { filters: {}, expectedRevision: target.revision.id },
+  ];
+  const dateOnlyQuery = '存在しない検索語句';
+  const warm = queries.map(({ filters }) =>
+    store.temporalCandidates(dateOnlyQuery, filters, [window], 100),
+  );
+  store.database.exec('DELETE FROM memory_segment_times; DELETE FROM memory_temporal_revisions');
+  const isProjected = (revisionId) =>
+    Boolean(
+      store.database
+        .prepare('SELECT 1 FROM memory_temporal_revisions WHERE revision_id=?')
+        .get(revisionId),
+    );
+  for (const [i, { filters, expectedRevision }] of queries.entries()) {
+    const cold = store.temporalCandidates(dateOnlyQuery, filters, [window], 100);
+    assert.deepEqual(cold, warm[i]);
+    assert(cold.some((candidate) => candidate.revisionId === expectedRevision));
+    if (i === 0) {
+      assert(!isProjected(coldHistory.revision.id));
+      assert(!isProjected(coldArchived.revision.id));
+      assert(!isProjected(target.revision.id));
+    }
+  }
   console.log(
     JSON.stringify({
       status: 'ok',
